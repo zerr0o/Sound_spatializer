@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 2,
+  "audio": {
+    "captureProvider": "native-driver",
+    "captureEndpointId": null,
+    "outputDeviceId": null,
+    "mode": "shared-low-latency",
+    "inputLayout": "stereo",
+    "sampleRate": 48000,
+    "bufferFrames": 128,
+    "bypass": false,
+    "masterGainDb": -6,
+    "roomMix": 0.18
+  },
+  "tracking": {
+    "enabled": true,
+    "cameraDeviceId": null,
+    "minimumFps": 60,
+    "predictionLimitMs": 20
+  },
+  "listener": {
+    "positionM": [0, 1.2, 0],
+    "neutralOrientation": [1, 0, 0, 0]
+  },
+  "speakers": [
+    { "channel": "front-left", "positionM": [-1, 1.2, 1.732051], "gainDb": 0, "enabled": true },
+    { "channel": "front-right", "positionM": [1, 1.2, 1.732051], "gainDb": 0, "enabled": true },
+    { "channel": "front-center", "positionM": [0, 1.2, 2], "gainDb": 0, "enabled": true },
+    { "channel": "surround-left", "positionM": [-1.879385, 1.2, -0.68404], "gainDb": 0, "enabled": true },
+    { "channel": "surround-right", "positionM": [1.879385, 1.2, -0.68404], "gainDb": 0, "enabled": true }
+  ],
+  "lfe": { "enabled": true, "gainDb": 0 },
+  "hrtf": {
+    "profileId": "sadie-d2-kemar",
+    "sofaPath": null
+  },
+  "headphoneEq": {
+    "enabled": false,
+    "preampDb": -6,
+    "filters": []
+  },
+  "room": {
+    "enabled": false,
+    "dimensionsM": [4.8, 2.7, 6.2],
+    "surfaces": [
+      { "materialId": "plaster", "absorption": [0.1, 0.05, 0.04], "diffusion": [0.05, 0.05, 0.05] },
+      { "materialId": "plaster", "absorption": [0.1, 0.05, 0.04], "diffusion": [0.05, 0.05, 0.05] },
+      { "materialId": "curtain", "absorption": [0.35, 0.55, 0.72], "diffusion": [0.05, 0.05, 0.05] },
+      { "materialId": "plaster", "absorption": [0.1, 0.05, 0.04], "diffusion": [0.05, 0.05, 0.05] },
+      { "materialId": "wood", "absorption": [0.15, 0.11, 0.1], "diffusion": [0.1, 0.1, 0.1] },
+      { "materialId": "plaster", "absorption": [0.1, 0.05, 0.04], "diffusion": [0.1, 0.1, 0.1] }
+    ],
+    "earlyReflectionOrder": 2,
+    "earlyReflectionLimitMs": 80,
+    "lateReverbEnabled": true
+  }
+}

@@ -44,8 +44,9 @@ struct HrtfLoadResult {
 
 // Performs HRTF database queries; production code calls this only from HrtfPreparationWorker.
 [[nodiscard]] bool build_binaural_filter_bank(const IHrtfDatabase& database,
-                                               const std::array<Vec3f, 2>& head_relative_directions,
-                                               const std::array<float, 2>& speaker_gains,
+                                               const std::array<Vec3f, kDirectionalSourceCount>& head_relative_directions,
+                                               const std::array<float, kDirectionalSourceCount>& speaker_gains,
+                                               std::size_t source_count,
                                                HrirFilterBank& output) noexcept;
 
 } // namespace sound_spatializer

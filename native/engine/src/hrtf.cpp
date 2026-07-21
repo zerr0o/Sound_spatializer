@@ -63,26 +63,29 @@ HrtfLoadResult load_sofa_hrtf(std::string_view path, std::uint32_t sample_rate) 
 }
 
 bool build_binaural_filter_bank(const IHrtfDatabase& database,
-                                const std::array<Vec3f, 2>& head_relative_directions,
-                                const std::array<float, 2>& speaker_gains,
+                                const std::array<Vec3f, kDirectionalSourceCount>& head_relative_directions,
+                                const std::array<float, kDirectionalSourceCount>& speaker_gains,
+                                std::size_t source_count,
                                 HrirFilterBank& output) noexcept {
-    HrirFilterBank candidate{};
+    if (source_count == 0 || source_count > kDirectionalSourceCount) return false;
+    output.tap_count = 0;
+    output.source_count = source_count;
+    for (auto& path : output.coefficients) path.fill(0.0F);
     std::size_t maximum_taps = 0;
-    for (std::size_t source = 0; source < 2; ++source) {
+    for (std::size_t source = 0; source < source_count; ++source) {
         std::size_t taps = 0;
-        if (!database.query(head_relative_directions[source], candidate.path(source, 0),
-                            candidate.path(source, 1), taps) ||
+        if (!database.query(head_relative_directions[source], output.path(source, 0),
+                            output.path(source, 1), taps) ||
             taps == 0 || taps > kMaximumHrirTaps) {
             return false;
         }
         maximum_taps = std::max(maximum_taps, taps);
         for (std::size_t tap = 0; tap < taps; ++tap) {
-            candidate.path(source, 0)[tap] *= speaker_gains[source];
-            candidate.path(source, 1)[tap] *= speaker_gains[source];
+            output.path(source, 0)[tap] *= speaker_gains[source];
+            output.path(source, 1)[tap] *= speaker_gains[source];
         }
     }
-    candidate.tap_count = maximum_taps;
-    output = candidate;
+    output.tap_count = maximum_taps;
     return true;
 }
 

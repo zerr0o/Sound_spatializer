@@ -380,6 +380,8 @@ struct AudioDeviceSummary {
     is_sound_spatializer_endpoint: bool,
     transport: &'static str,
     sample_rate: u32,
+    channel_count: u16,
+    channel_mask: u32,
 }
 
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -457,19 +459,23 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), String> {
 
 #[tauri::command(async)]
 fn load_app_config(app: AppHandle) -> Result<Option<String>, String> {
-    let path = app_data_dir(&app)?.join("desktop-config-v1.json");
-    match fs::metadata(&path) {
-        Ok(metadata) if !metadata.is_file() || metadata.len() > MAX_JSON_BYTES as u64 => {
-            Err("Configuration locale invalide ou trop volumineuse".into())
+    let directory = app_data_dir(&app)?;
+    for file_name in ["desktop-config-v2.json", "desktop-config-v1.json"] {
+        let path = directory.join(file_name);
+        match fs::metadata(&path) {
+            Ok(metadata) if !metadata.is_file() || metadata.len() > MAX_JSON_BYTES as u64 => {
+                return Err("Configuration locale invalide ou trop volumineuse".into());
+            }
+            Ok(_) => {
+                let value = fs::read_to_string(path).map_err(|error| error.to_string())?;
+                validate_app_config_json(&value)?;
+                return Ok(Some(value));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
         }
-        Ok(_) => {
-            let value = fs::read_to_string(path).map_err(|error| error.to_string())?;
-            validate_app_config_json(&value)?;
-            Ok(Some(value))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.to_string()),
     }
+    Ok(None)
 }
 
 fn validate_app_config_json(payload: &str) -> Result<(), String> {
@@ -478,14 +484,15 @@ fn validate_app_config_json(payload: &str) -> Result<(), String> {
     }
     let document: serde_json::Value =
         serde_json::from_str(payload).map_err(|error| format!("JSON invalide : {error}"))?;
-    if document
+    let envelope_version = document
         .get("schemaVersion")
         .and_then(serde_json::Value::as_u64)
-        != Some(1)
-        || document
-            .pointer("/scene/schemaVersion")
-            .and_then(serde_json::Value::as_u64)
-            != Some(1)
+        .unwrap_or_default();
+    let scene_version = document
+        .pointer("/scene/schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    if !matches!((envelope_version, scene_version), (1, 1) | (2, 2))
         || !document
             .get("preferences")
             .is_some_and(serde_json::Value::is_object)
@@ -498,8 +505,17 @@ fn validate_app_config_json(payload: &str) -> Result<(), String> {
 #[tauri::command(async)]
 fn save_app_config(app: AppHandle, payload: String) -> Result<(), String> {
     validate_app_config_json(&payload)?;
+    let document: serde_json::Value =
+        serde_json::from_str(&payload).map_err(|error| format!("JSON invalide : {error}"))?;
+    if document
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        != Some(2)
+    {
+        return Err("Seule la configuration courante V2 peut être enregistrée".into());
+    }
     atomic_write(
-        &app_data_dir(&app)?.join("desktop-config-v1.json"),
+        &app_data_dir(&app)?.join("desktop-config-v2.json"),
         payload.as_bytes(),
     )
 }
@@ -1664,19 +1680,33 @@ fn windows_audio_devices() -> Result<Vec<AudioDeviceSummary>, String> {
             .unwrap_or(0)
     }
 
-    unsafe fn mix_sample_rate(device: &IMMDevice) -> u32 {
+    unsafe fn mix_format_summary(device: &IMMDevice) -> (u32, u16, u32) {
         let Ok(client) = device.Activate::<IAudioClient>(CLSCTX_ALL, None) else {
-            return 0;
+            return (0, 0, 0);
         };
         let Ok(format) = client.GetMixFormat() else {
-            return 0;
+            return (0, 0, 0);
         };
         if format.is_null() {
-            return 0;
+            return (0, 0, 0);
         }
         let sample_rate = (*format).nSamplesPerSec;
+        let channel_count = (*format).nChannels;
+        let channel_mask = if (*format).wFormatTag == 0xfffe && (*format).cbSize as usize >= 22 {
+            let extensible = format.cast::<WAVEFORMATEXTENSIBLE>();
+            std::ptr::addr_of!((*extensible).dwChannelMask).read_unaligned()
+        } else {
+            match channel_count {
+                1 => 0x4,
+                2 => 0x3,
+                // A legacy WAVEFORMATEX has no authoritative speaker map.
+                // Never infer 5.1 from a bare six-channel count: the native
+                // backend deliberately requires WAVEFORMATEXTENSIBLE too.
+                _ => 0,
+            }
+        };
         CoTaskMemFree(Some(format.cast()));
-        sample_rate
+        (sample_rate, channel_count, channel_mask)
     }
 
     unsafe {
@@ -1725,6 +1755,7 @@ fn windows_audio_devices() -> Result<Vec<AudioDeviceSummary>, String> {
             } else {
                 "unknown"
             };
+            let (sample_rate, channel_count, channel_mask) = mix_format_summary(&device);
             result.push(AudioDeviceSummary {
                 is_default: default_id.as_deref() == Some(id.as_str()),
                 is_sound_spatializer_endpoint: is_sound_spatializer_endpoint(
@@ -1734,7 +1765,9 @@ fn windows_audio_devices() -> Result<Vec<AudioDeviceSummary>, String> {
                 id,
                 name,
                 transport,
-                sample_rate: mix_sample_rate(&device),
+                sample_rate,
+                channel_count,
+                channel_mask,
             });
         }
         Ok(result)
@@ -2016,7 +2049,15 @@ mod tests {
         )
         .is_ok());
         assert!(validate_app_config_json(
+            r#"{"schemaVersion":2,"scene":{"schemaVersion":2},"preferences":{}}"#
+        )
+        .is_ok());
+        assert!(validate_app_config_json(
             r#"{"schemaVersion":1,"scene":{"schemaVersion":2},"preferences":{}}"#
+        )
+        .is_err());
+        assert!(validate_app_config_json(
+            r#"{"schemaVersion":2,"scene":{"schemaVersion":1},"preferences":{}}"#
         )
         .is_err());
         assert!(

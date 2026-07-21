@@ -4,7 +4,7 @@ import App from './App';
 import { defaultPreferences, defaultScene, emptyEngineStatus } from './data/defaults';
 import { desktopBridge } from './lib/tauri-bridge';
 import { useAppStore } from './store/app-store';
-import type { AudioDeviceSummary, PersistedAppConfigV1 } from './types/contracts';
+import type { AudioDeviceSummary, PersistedAppConfigV2 } from './types/contracts';
 
 vi.mock('./tracking/TrackingProvider', () => ({
   useTrackingController: () => ({ calibrate: vi.fn().mockResolvedValue(true) }),
@@ -19,6 +19,8 @@ const physical: AudioDeviceSummary = {
   isSoundSpatializerEndpoint: false,
   transport: 'usb',
   sampleRate: 48_000,
+  channelCount: 2,
+  channelMask: 0x3,
 };
 
 const external: AudioDeviceSummary = {
@@ -28,15 +30,17 @@ const external: AudioDeviceSummary = {
   isSoundSpatializerEndpoint: false,
   transport: 'unknown',
   sampleRate: 48_000,
+  channelCount: 2,
+  channelMask: 0x3,
 };
 
-const externalConfig = (): PersistedAppConfigV1 => {
+const externalConfig = (): PersistedAppConfigV2 => {
   const scene = structuredClone(defaultScene);
   scene.captureProvider = 'external-render';
   scene.captureEndpointId = external.id;
   scene.physicalOutputDeviceId = physical.id;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     scene,
     preferences: { ...defaultPreferences, onboardingComplete: true },
   };

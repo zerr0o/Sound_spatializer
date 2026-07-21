@@ -3,10 +3,11 @@ import { Canvas, useFrame } from '@react-three/fiber';
 import { Component, type ErrorInfo, type PropsWithChildren, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { Box, Rotate3D } from 'lucide-react';
-import type { HeadPoseSampleV1, ListenerConfig, RoomConfig, SpeakerConfig } from '../../types/contracts';
+import { isSpeakerRouted, SPEAKER_COLORS } from '../../lib/speaker-layout';
+import type { Channel, HeadPoseSampleV1, InputLayout, ListenerConfig, RoomConfig, SpeakerConfig, SpeakerSet } from '../../types/contracts';
 
-function Speaker({ speaker, selected, onSelect }: { speaker: SpeakerConfig; selected: boolean; onSelect: () => void }) {
-  const color = speaker.channel === 'L' ? '#67ead3' : '#7ea8ff';
+function Speaker({ speaker, selected, routed, onSelect }: { speaker: SpeakerConfig; selected: boolean; routed: boolean; onSelect: () => void }) {
+  const color = SPEAKER_COLORS[speaker.channel];
   return (
     <group position={[speaker.position.x, speaker.position.y, -speaker.position.z]} onClick={(event) => { event.stopPropagation(); onSelect(); }}>
       {selected && (
@@ -16,19 +17,19 @@ function Speaker({ speaker, selected, onSelect }: { speaker: SpeakerConfig; sele
         </mesh>
       )}
       <RoundedBox args={[0.45, 0.84, 0.38]} radius={0.055} smoothness={4} castShadow>
-        <meshStandardMaterial color="#161e27" roughness={0.38} metalness={0.35} />
+        <meshStandardMaterial color="#161e27" roughness={0.38} metalness={0.35} transparent opacity={routed ? 1 : 0.42} />
       </RoundedBox>
       <mesh position={[0, 0.2, 0.197]}>
         <circleGeometry args={[0.104, 40]} />
-        <meshStandardMaterial color="#070b10" roughness={0.55} />
+        <meshStandardMaterial color="#070b10" roughness={0.55} transparent opacity={routed ? 1 : 0.42} />
       </mesh>
       <mesh position={[0, -0.15, 0.2]}>
         <circleGeometry args={[0.16, 40]} />
-        <meshStandardMaterial color="#05080b" roughness={0.45} />
+        <meshStandardMaterial color="#05080b" roughness={0.45} transparent opacity={routed ? 1 : 0.42} />
       </mesh>
       <mesh position={[0, -0.15, 0.205]}>
         <ringGeometry args={[0.11, 0.148, 40]} />
-        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={selected ? 0.75 : 0.24} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={routed ? selected ? 0.75 : 0.24 : 0.03} transparent opacity={routed ? 1 : 0.34} />
       </mesh>
       <Html center position={[0, 0.69, 0]} distanceFactor={7} style={{ pointerEvents: 'none' }}>
         <span className={`object-label speaker-${speaker.channel.toLowerCase()}`}>{speaker.channel}</span>
@@ -89,7 +90,7 @@ function Listener({ pose, listener }: { pose: HeadPoseSampleV1 | null; listener:
 }
 
 function SoundPath({ speaker, listener }: { speaker: SpeakerConfig; listener: ListenerConfig }) {
-  const color = speaker.channel === 'L' ? '#67ead3' : '#7ea8ff';
+  const color = SPEAKER_COLORS[speaker.channel];
   return (
     <>
       <Line
@@ -154,12 +155,13 @@ function RoomOutline({ room }: { room: RoomConfig }) {
 }
 
 interface SceneProps {
-  speakers: [SpeakerConfig, SpeakerConfig];
+  speakers: SpeakerSet;
   listener: ListenerConfig;
   room: RoomConfig;
   pose: HeadPoseSampleV1 | null;
-  selectedSpeaker: 'L' | 'R';
-  onSelectSpeaker: (id: 'L' | 'R') => void;
+  inputLayout: InputLayout;
+  selectedSpeaker: Channel;
+  onSelectSpeaker: (id: Channel) => void;
 }
 
 export function SpatialScene(props: SceneProps) {
@@ -170,7 +172,6 @@ export function SpatialScene(props: SceneProps) {
         dpr={[1, 1.6]}
         camera={{ position: [4.4, 4.2, 5.5], fov: 40, near: 0.1, far: 60 }}
         gl={{ antialias: true, powerPreference: 'high-performance', alpha: true }}
-        onPointerMissed={() => props.onSelectSpeaker('L')}
       >
         <color attach="background" args={['#0b1218']} />
         <fog attach="fog" args={['#0b1218', 9, 17]} />
@@ -194,8 +195,8 @@ export function SpatialScene(props: SceneProps) {
         />
         {props.speakers.map((speaker) => (
           <group key={speaker.id}>
-            <Speaker speaker={speaker} selected={props.selectedSpeaker === speaker.id} onSelect={() => props.onSelectSpeaker(speaker.id)} />
-            {!speaker.muted && <SoundPath speaker={speaker} listener={props.listener} />}
+            <Speaker speaker={speaker} selected={props.selectedSpeaker === speaker.id} routed={isSpeakerRouted(props.inputLayout, speaker.id)} onSelect={() => props.onSelectSpeaker(speaker.id)} />
+            {isSpeakerRouted(props.inputLayout, speaker.id) && !speaker.muted && <SoundPath speaker={speaker} listener={props.listener} />}
           </group>
         ))}
         <Listener pose={props.pose} listener={props.listener} />

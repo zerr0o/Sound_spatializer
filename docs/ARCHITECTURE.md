@@ -84,7 +84,8 @@ produit.
 
 ## Contrats
 
-Le schéma persistant canonique est `contracts/scene-config-v1.schema.json`. Les
+Le schéma persistant canonique est `contracts/scene-config-v2.schema.json`. Les
+configurations V1 sont relues puis migrées sans écraser leur fichier source. Les
 types plus riches de l'interface doivent être convertis explicitement à cette
 forme ; ils ne constituent pas un second format implicite.
 

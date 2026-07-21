@@ -177,3 +177,19 @@ input[type='range'] { height: 3px; margin: 4px 0; border-radius: 3px; background
 .capture-provider-card > span:nth-of-type(2) { display: flex; flex-direction: column; gap: 3px; }
 .capture-provider-card:focus-within { outline: 2px solid rgba(104,229,207,.62); outline-offset: 2px; }
 .capture-provider-grid:disabled .capture-provider-card { cursor: wait; opacity: .62; }
+
+/* Implantation multicanale : la couleur complète toujours le libellé du canal. */
+.legend-unrouted { border: 1px solid #53636b; background: rgba(83,99,107,.18); }
+.speaker-c { color: #ffc66d; }
+.speaker-ls { color: #b794f6; }
+.speaker-rs { color: #f08cc4; }
+.speaker-color.speaker-c { background: #ffc66d; }
+.speaker-color.speaker-ls { background: #b794f6; }
+.speaker-color.speaker-rs { background: #f08cc4; }
+.speaker-selector button.is-unrouted { opacity: .48; border-style: dashed; }
+.input-layout-control { display: grid; gap: 7px; }
+.control-warning { color: #d6a65e; font-size: 8px; line-height: 1.4; }
+.lfe-editor { display: grid; gap: 12px; padding: 11px; border: 1px solid var(--border); border-radius: 7px; background: rgba(255,198,109,.025); }
+.lfe-editor > span { display: flex; justify-content: space-between; color: #64757d; font-size: 7px; }
+.lfe-editor > span small { color: #c59a59; font-weight: 700; letter-spacing: .08em; }
+.lfe-editor > span i { font-style: normal; }

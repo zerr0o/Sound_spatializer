@@ -6,8 +6,8 @@ import type {
   AudioDeviceSummary,
   EngineStatusV1,
   HeadPoseSampleV1,
-  PersistedAppConfigV1,
-  SceneConfigV1,
+  PersistedAppConfigV2,
+  SceneConfigV2,
   TrackingMetrics,
   ViewId,
 } from '../types/contracts';
@@ -26,16 +26,16 @@ interface AppState {
   driverEndpointAvailable: boolean;
   audioRouteReady: boolean;
   audioRouteIssue: AudioRouteIssue | null;
-  scene: SceneConfigV1;
+  scene: SceneConfigV2;
   preferences: AppPreferences;
   engine: EngineStatusV1;
   tracking: TrackingMetrics;
   audioDevices: AudioDeviceSummary[];
   toasts: ToastMessage[];
   setActiveView: (view: ViewId) => void;
-  hydrate: (config: PersistedAppConfigV1 | null) => void;
-  patchScene: (patch: Partial<SceneConfigV1>) => void;
-  replaceScene: (scene: SceneConfigV1) => void;
+  hydrate: (config: PersistedAppConfigV2 | null) => void;
+  patchScene: (patch: Partial<SceneConfigV2>) => void;
+  replaceScene: (scene: SceneConfigV2) => void;
   patchPreferences: (patch: Partial<AppPreferences>) => void;
   setEngine: (engine: EngineStatusV1) => void;
   patchTracking: (tracking: Partial<TrackingMetrics>) => void;
@@ -64,8 +64,8 @@ export const useAppStore = create<AppState>((set) => ({
   setActiveView: (activeView) => set({ activeView }),
   hydrate: (config) =>
     set({
-      scene: config?.schemaVersion === 1 ? config.scene : structuredClone(defaultScene),
-      preferences: config?.schemaVersion === 1 ? config.preferences : { ...defaultPreferences },
+      scene: config?.schemaVersion === 2 ? config.scene : structuredClone(defaultScene),
+      preferences: config?.schemaVersion === 2 ? config.preferences : { ...defaultPreferences },
       activeView: config?.preferences.onboardingComplete ? 'scene' : 'assistant',
       initialized: true,
     }),
@@ -92,8 +92,8 @@ export const useAppStore = create<AppState>((set) => ({
   dismissToast: (id) => set((state) => ({ toasts: state.toasts.filter((item) => item.id !== id) })),
 }));
 
-export const selectPersistedConfig = (state: AppState): PersistedAppConfigV1 => ({
-  schemaVersion: 1,
+export const selectPersistedConfig = (state: AppState): PersistedAppConfigV2 => ({
+  schemaVersion: 2,
   scene: state.scene,
   preferences: state.preferences,
 });

@@ -141,6 +141,7 @@ export function AppShell({ children }: PropsWithChildren) {
 function audioRouteChip(issue: ReturnType<typeof useAppStore.getState>['audioRouteIssue'], provider: ReturnType<typeof useAppStore.getState>['scene']['captureProvider']) {
   if (issue === 'desktop-runtime-required') return 'Aperçu navigateur';
   if (issue === 'native-endpoint-unavailable') return 'Pilote natif absent';
+  if (issue === 'capture-layout-unsupported') return 'Source 5.1 incompatible';
   if (provider === 'external-render') return 'Routage externe incomplet';
   return 'Audio non configuré';
 }

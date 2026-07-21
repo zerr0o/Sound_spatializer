@@ -1,6 +1,7 @@
 #include "sound_spatializer/audio_backend.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 
 namespace sound_spatializer {
@@ -22,6 +23,16 @@ bool validate_audio_backend_config(const AudioBackendConfig& config, std::string
     if (config.capture_provider != CaptureProvider::native_driver &&
         config.capture_provider != CaptureProvider::external_render) {
         error = "unsupported capture provider";
+        return false;
+    }
+    if (config.input_layout != InputLayout::stereo &&
+        config.input_layout != InputLayout::surround_5_1) {
+        error = "unsupported input layout";
+        return false;
+    }
+    if (config.input_layout == InputLayout::surround_5_1 &&
+        config.capture_provider != CaptureProvider::external_render) {
+        error = "5.1 capture requires an external render endpoint such as a 5.1-configured VB-CABLE";
         return false;
     }
     if (config.capture_provider == CaptureProvider::external_render) {
@@ -112,6 +123,9 @@ bool MockAudioBackend::start(const AudioBackendConfig& config, IAudioProcessor& 
     diagnostics_ = {};
     diagnostics_.capture_state = StreamState::running;
     diagnostics_.render_state = StreamState::running;
+    diagnostics_.capture_channels = expected_input_channel_count(config.input_layout);
+    diagnostics_.capture_channel_mask =
+        config.input_layout == InputLayout::surround_5_1 ? kSurround51ChannelMask : kStereoChannelMask;
     diagnostics_.capture_sample_rate = kSampleRate;
     diagnostics_.render_sample_rate = kSampleRate;
     diagnostics_.render_sample_format = AudioSampleFormat::float32;
@@ -130,13 +144,37 @@ void MockAudioBackend::stop() noexcept {
     diagnostics_.render_sample_format = AudioSampleFormat::unknown;
 }
 
-void MockAudioBackend::process_block(const StereoFrame* input, StereoFrame* output, std::size_t frame_count,
+void MockAudioBackend::process_block(const ProgrammeFrame* input, StereoFrame* output, std::size_t frame_count,
                                      std::int64_t render_qpc) noexcept {
     if (!running_ || processor_ == nullptr || output == nullptr) {
         if (output != nullptr) std::fill_n(output, frame_count, StereoFrame{});
         return;
     }
     processor_->process_audio(input, output, frame_count, render_qpc);
+}
+
+void MockAudioBackend::process_block(const StereoFrame* input, StereoFrame* output, std::size_t frame_count,
+                                     std::int64_t render_qpc) noexcept {
+    if (!running_ || processor_ == nullptr || output == nullptr) {
+        if (output != nullptr) std::fill_n(output, frame_count, StereoFrame{});
+        return;
+    }
+
+    constexpr std::size_t kConversionChunkFrames = 2'048;
+    std::array<ProgrammeFrame, kConversionChunkFrames> programme{};
+    std::size_t offset = 0;
+    while (offset < frame_count) {
+        const std::size_t count = std::min(kConversionChunkFrames, frame_count - offset);
+        for (std::size_t frame = 0; frame < count; ++frame) {
+            programme[frame] = {};
+            if (input != nullptr) {
+                programme[frame].front_left = input[offset + frame].left;
+                programme[frame].front_right = input[offset + frame].right;
+            }
+        }
+        processor_->process_audio(programme.data(), output + offset, count, render_qpc);
+        offset += count;
+    }
 }
 
 #if defined(_WIN32)

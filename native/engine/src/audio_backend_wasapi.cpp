@@ -32,6 +32,10 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
+static_assert(kStereoChannelMask == KSAUDIO_SPEAKER_STEREO);
+static_assert(kSurround51BackChannelMask == KSAUDIO_SPEAKER_5POINT1);
+static_assert(kSurround51ChannelMask == KSAUDIO_SPEAKER_5POINT1_SURROUND);
+
 [[nodiscard]] std::string hresult_message(std::string_view operation, HRESULT result);
 
 [[nodiscard]] constexpr bool should_fallback_to_legacy_after_period_query(HRESULT result) noexcept {
@@ -137,9 +141,10 @@ private:
                                           native_test_override_id);
 }
 
-[[nodiscard]] bool is_float_stereo_48k(const WAVEFORMATEX* format) noexcept {
-    if (format == nullptr || format->nChannels != 2 || format->nSamplesPerSec != kSampleRate ||
-        format->wBitsPerSample != 32 || format->nBlockAlign != sizeof(StereoFrame)) return false;
+[[nodiscard]] bool is_float_48k(const WAVEFORMATEX* format, WORD channels) noexcept {
+    if (format == nullptr || format->nChannels != channels || format->nSamplesPerSec != kSampleRate ||
+        format->wBitsPerSample != 32 ||
+        format->nBlockAlign != static_cast<WORD>(channels * sizeof(float))) return false;
     if (format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) return true;
     if (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE && format->cbSize >= 22) {
         const auto* extensible = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
@@ -148,19 +153,86 @@ private:
     return false;
 }
 
-[[nodiscard]] WAVEFORMATEXTENSIBLE canonical_stereo_float_48k() noexcept {
+[[nodiscard]] WAVEFORMATEXTENSIBLE canonical_float_48k(WORD channels, DWORD channel_mask) noexcept {
     WAVEFORMATEXTENSIBLE format{};
     format.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-    format.Format.nChannels = 2;
+    format.Format.nChannels = channels;
     format.Format.nSamplesPerSec = kSampleRate;
     format.Format.wBitsPerSample = 32;
-    format.Format.nBlockAlign = static_cast<WORD>(sizeof(StereoFrame));
+    format.Format.nBlockAlign = static_cast<WORD>(channels * sizeof(float));
     format.Format.nAvgBytesPerSec = format.Format.nSamplesPerSec * format.Format.nBlockAlign;
     format.Format.cbSize = static_cast<WORD>(sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX));
     format.Samples.wValidBitsPerSample = 32;
-    format.dwChannelMask = KSAUDIO_SPEAKER_STEREO;
+    format.dwChannelMask = channel_mask;
     format.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
     return format;
+}
+
+[[nodiscard]] WAVEFORMATEXTENSIBLE canonical_stereo_float_48k() noexcept {
+    return canonical_float_48k(2, KSAUDIO_SPEAKER_STEREO);
+}
+
+[[nodiscard]] std::string surround_5_1_format_error(std::string_view detail) {
+    std::string result = "the selected capture endpoint is not configured for usable 5.1 audio";
+    if (!detail.empty()) {
+        result += " (";
+        result += detail;
+        result += ')';
+    }
+    result += ". Open mmsys.cpl > Playback > CABLE Input > Configure > 5.1, "
+              "then restart applications that produce audio";
+    return result;
+}
+
+[[nodiscard]] bool validate_surround_5_1_mix_format(const WAVEFORMATEX* format,
+                                                     DWORD& channel_mask,
+                                                     std::string& error) {
+    channel_mask = 0;
+    if (format == nullptr) {
+        error = surround_5_1_format_error("the endpoint returned no mix format");
+        return false;
+    }
+    if (format->nChannels != 6) {
+        char detail[80]{};
+        std::snprintf(detail, sizeof(detail), "Windows currently exposes %u channels, expected 6",
+                      static_cast<unsigned int>(format->nChannels));
+        error = surround_5_1_format_error(detail);
+        return false;
+    }
+    if (format->wFormatTag != WAVE_FORMAT_EXTENSIBLE || format->cbSize < 22) {
+        error = surround_5_1_format_error("six-channel PCM requires WAVEFORMATEXTENSIBLE");
+        return false;
+    }
+
+    const auto* extensible = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
+    channel_mask = extensible->dwChannelMask;
+    if (!is_supported_surround_5_1_channel_mask(channel_mask)) {
+        char detail[80]{};
+        std::snprintf(detail, sizeof(detail), "unsupported Windows channel mask 0x%08lX",
+                      static_cast<unsigned long>(channel_mask));
+        error = surround_5_1_format_error(detail);
+        return false;
+    }
+
+    const bool ieee_float = IsEqualGUID(extensible->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) != FALSE;
+    const bool integer_pcm = IsEqualGUID(extensible->SubFormat, KSDATAFORMAT_SUBTYPE_PCM) != FALSE;
+    const bool supported_container =
+        (ieee_float && format->wBitsPerSample == 32) ||
+        (integer_pcm && (format->wBitsPerSample == 16 || format->wBitsPerSample == 24 ||
+                         format->wBitsPerSample == 32));
+    if (!supported_container) {
+        error = surround_5_1_format_error("the mix format is not uncompressed PCM or float32");
+        return false;
+    }
+    const WORD expected_block_align =
+        static_cast<WORD>(format->nChannels * (format->wBitsPerSample / 8U));
+    if (format->nBlockAlign != expected_block_align ||
+        extensible->Samples.wValidBitsPerSample > format->wBitsPerSample) {
+        error = surround_5_1_format_error("the endpoint returned an inconsistent PCM container");
+        return false;
+    }
+    error.clear();
+    return true;
 }
 
 [[nodiscard]] WAVEFORMATEXTENSIBLE canonical_stereo_pcm_s32_48k() noexcept {
@@ -265,6 +337,8 @@ private:
     std::atomic<std::uint32_t> runtime_error_{static_cast<std::uint32_t>(RuntimeAudioError::none)};
     std::atomic<std::uint32_t> capture_state_{static_cast<std::uint32_t>(StreamState::stopped)};
     std::atomic<std::uint32_t> render_state_{static_cast<std::uint32_t>(StreamState::stopped)};
+    std::atomic<std::uint32_t> capture_channels_{};
+    std::atomic<std::uint32_t> capture_channel_mask_{};
     std::atomic<std::uint32_t> capture_rate_{};
     std::atomic<std::uint32_t> render_rate_{};
     std::atomic<std::uint32_t> render_sample_format_{
@@ -353,6 +427,8 @@ AudioBackendDiagnostics WasapiAudioBackend::diagnostics() const {
     AudioBackendDiagnostics result{};
     result.capture_state = static_cast<StreamState>(capture_state_.load(std::memory_order_acquire));
     result.render_state = static_cast<StreamState>(render_state_.load(std::memory_order_acquire));
+    result.capture_channels = capture_channels_.load(std::memory_order_relaxed);
+    result.capture_channel_mask = capture_channel_mask_.load(std::memory_order_relaxed);
     result.capture_sample_rate = capture_rate_.load(std::memory_order_relaxed);
     result.render_sample_rate = render_rate_.load(std::memory_order_relaxed);
     result.render_sample_format = static_cast<AudioSampleFormat>(
@@ -404,6 +480,8 @@ void WasapiAudioBackend::worker(std::stop_token stop_token) {
         HANDLE mmcss_handle = nullptr;
         render_sample_format_.store(static_cast<std::uint32_t>(AudioSampleFormat::unknown),
                                     std::memory_order_release);
+        capture_channels_.store(0U, std::memory_order_relaxed);
+        capture_channel_mask_.store(0U, std::memory_order_relaxed);
 
         do {
         ComPtr<IMMDeviceEnumerator> enumerator;
@@ -458,10 +536,31 @@ void WasapiAudioBackend::worker(std::stop_token stop_token) {
         if (FAILED(result)) { finish_initialization(false, hresult_message("get loopback mix format", result)); break; }
         result = render_client->GetMixFormat(&render_format_raw);
         if (FAILED(result)) { CoTaskMemFree(capture_format_raw); finish_initialization(false, hresult_message("get render mix format", result)); break; }
-        const bool capture_mix_is_canonical = is_float_stereo_48k(capture_format_raw);
-        const bool render_mix_is_canonical = is_float_stereo_48k(render_format_raw);
+        const bool surround_input = config_.input_layout == InputLayout::surround_5_1;
+        const WORD capture_channels =
+            static_cast<WORD>(expected_input_channel_count(config_.input_layout));
+        DWORD capture_channel_mask = KSAUDIO_SPEAKER_STEREO;
+        if (surround_input) {
+            std::string format_error;
+            if (!validate_surround_5_1_mix_format(capture_format_raw, capture_channel_mask,
+                                                  format_error)) {
+                CoTaskMemFree(capture_format_raw);
+                CoTaskMemFree(render_format_raw);
+                finish_initialization(false, std::move(format_error));
+                break;
+            }
+        }
+        const bool capture_mix_is_canonical =
+            is_float_48k(capture_format_raw, capture_channels) &&
+            (!surround_input ||
+             reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(capture_format_raw)->dwChannelMask ==
+                 capture_channel_mask);
+        const bool render_mix_is_canonical = is_float_48k(render_format_raw, 2);
         const WAVEFORMATEXTENSIBLE canonical_format = canonical_stereo_float_48k();
         const WAVEFORMATEX* canonical_wave_format = &canonical_format.Format;
+        const WAVEFORMATEXTENSIBLE canonical_capture_format =
+            canonical_float_48k(capture_channels, capture_channel_mask);
+        const WAVEFORMATEX* canonical_capture_wave_format = &canonical_capture_format.Format;
         const WAVEFORMATEX legacy_float_format = legacy_stereo_32_bit_48k(WAVE_FORMAT_IEEE_FLOAT);
         const WAVEFORMATEXTENSIBLE canonical_pcm_s32_format = canonical_stereo_pcm_s32_48k();
         const WAVEFORMATEX legacy_pcm_s32_format = legacy_stereo_32_bit_48k(WAVE_FORMAT_PCM);
@@ -502,7 +601,12 @@ void WasapiAudioBackend::worker(std::stop_token stop_token) {
         };
 
         if (!capture_mix_is_canonical) {
-            result = initialize_legacy_loopback(canonical_wave_format, conversion_stream_flags);
+            // Keep the endpoint's channel count and speaker mask. In 5.1 mode
+            // AUTOCONVERTPCM may normalize PCM/sample rate to float32/48 kHz,
+            // but it must never be allowed to matrix a stereo endpoint up to
+            // six channels or a six-channel endpoint down to stereo.
+            result = initialize_legacy_loopback(canonical_capture_wave_format,
+                                                conversion_stream_flags);
         } else {
             result = capture_client.As(&capture_client3);
         }
@@ -699,12 +803,14 @@ void WasapiAudioBackend::worker(std::stop_token stop_token) {
                 selected_period = render_buffer_frames;
             CoTaskMemFree(current_render_format);
         }
+        capture_channels_.store(capture_channels, std::memory_order_relaxed);
+        capture_channel_mask_.store(capture_channel_mask, std::memory_order_relaxed);
         capture_rate_.store(kSampleRate, std::memory_order_relaxed);
         render_rate_.store(kSampleRate, std::memory_order_relaxed);
         capture_period_.store(std::max<UINT32>(1, current_capture_period), std::memory_order_relaxed);
         render_period_.store(std::max<UINT32>(1, selected_period), std::memory_order_relaxed);
 
-        AsyncStereoResampler resampler(std::max<std::size_t>(8'192, capture_buffer_frames * 8ULL));
+        AsyncProgrammeResampler resampler(std::max<std::size_t>(8'192, capture_buffer_frames * 8ULL));
         ClockDriftEstimator clock_drift;
         UINT64 capture_clock_frequency = 0;
         UINT64 render_clock_frequency = 0;
@@ -717,8 +823,8 @@ void WasapiAudioBackend::worker(std::stop_token stop_token) {
         // deliberate FIFO latency when packets really arrive every few ms.
         resampler.set_target_fill(select_asrc_target_fill_frames(
             0U, selected_period, config_.requested_buffer_frames));
-        std::vector<StereoFrame> capture_work(std::max<UINT32>(capture_buffer_frames, 1));
-        std::vector<StereoFrame> render_input(std::max<UINT32>(render_buffer_frames, 1));
+        std::vector<ProgrammeFrame> capture_work(std::max<UINT32>(capture_buffer_frames, 1));
+        std::vector<ProgrammeFrame> render_input(std::max<UINT32>(render_buffer_frames, 1));
         std::vector<StereoFrame> render_output(
             effective_render_sample_format == AudioSampleFormat::pcm_s32
                 ? std::max<UINT32>(render_buffer_frames, 1)
@@ -811,10 +917,20 @@ void WasapiAudioBackend::worker(std::stop_token stop_token) {
                         frames, selected_period, config_.requested_buffer_frames));
                 }
                 if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || data == nullptr)
-                    std::fill_n(capture_work.data(), frames, StereoFrame{});
-                else
+                    std::fill_n(capture_work.data(), frames, ProgrammeFrame{});
+                else if (surround_input)
                     std::memcpy(capture_work.data(), data,
-                                static_cast<std::size_t>(frames) * sizeof(StereoFrame));
+                                static_cast<std::size_t>(frames) * sizeof(ProgrammeFrame));
+                else {
+                    for (std::size_t frame = 0; frame < frames; ++frame) {
+                        StereoFrame stereo{};
+                        std::memcpy(&stereo, data + frame * sizeof(StereoFrame),
+                                    sizeof(StereoFrame));
+                        capture_work[frame] = {};
+                        capture_work[frame].front_left = stereo.left;
+                        capture_work[frame].front_right = stereo.right;
+                    }
+                }
                 (void)resampler.push(capture_work.data(), frames);
                 result = capture_service->ReleaseBuffer(frames);
                 if (FAILED(result)) {

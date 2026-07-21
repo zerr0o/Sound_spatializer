@@ -1,7 +1,7 @@
 # Sound Spatializer
 
 Sound Spatializer est une application Windows 11 qui transforme un mix stéréo
-en deux enceintes virtuelles fixes dans la pièce. La rotation de la tête, estimée
+ou PCM 5.1 en enceintes virtuelles fixes dans la pièce. La rotation de la tête, estimée
 localement par la webcam, pilote un rendu binaural dynamique vers un casque
 filaire ou USB.
 
@@ -70,6 +70,11 @@ jamais un fournisseur depuis son nom et refuse toute route source = sortie. Ce
 chemin est un mode de développement/compatibilité ; il ne remplace pas la
 qualification du pilote natif et ne doit pas être confondu avec le mode de
 tampon audio « Compatibilité » à 256 frames.
+
+L'entrée 5.1 utilise ce chemin externe et exige un endpoint Windows configuré
+en six canaux ; le pilote natif reste stéréo. Les cinq canaux principaux sont
+spatialisés comme des enceintes L/R/C/LS/RS, tandis que le LFE reste
+non directionnel. Voir [la configuration et le test du surround](docs/SURROUND_5_1.md).
 
 ## Sécurité et confidentialité
 

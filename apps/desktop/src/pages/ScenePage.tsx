@@ -5,9 +5,11 @@ import { RangeControl, SegmentedControl, Toggle } from '../components/ui/Control
 import { applyMaterialPreset, MATERIAL_PRESETS, ROOM_SURFACES, setSurfaceBand, type AcousticBand, type RoomSurfaceKey } from '../lib/room-acoustics';
 import { speakerPolarFromListener, speakerPositionFromPolar } from '../lib/scene-geometry';
 import { isTauriRuntime } from '../lib/tauri-bridge';
+import { supportsSurround5_1 } from '../lib/runtime-capabilities';
+import { isSpeakerRouted, pairedSpeakerChannel } from '../lib/speaker-layout';
 import { useAppStore } from '../store/app-store';
 import { useTrackingController } from '../tracking/TrackingProvider';
-import type { Channel, SpeakerConfig } from '../types/contracts';
+import type { Channel, InputLayout, SpeakerConfig, SpeakerSet } from '../types/contracts';
 
 type InspectorMode = 'speakers' | 'room';
 type ReflectionOrderOption = '0' | '1' | '2';
@@ -17,6 +19,7 @@ export function ScenePage() {
   const tracking = useAppStore((state) => state.tracking);
   const patchScene = useAppStore((state) => state.patchScene);
   const notify = useAppStore((state) => state.notify);
+  const audioDevices = useAppStore((state) => state.audioDevices);
   const { start, calibrate, running } = useTrackingController();
   const [selected, setSelected] = useState<Channel>('L');
   const [linked, setLinked] = useState(true);
@@ -28,9 +31,14 @@ export function ScenePage() {
     [scene.listener.position, speaker.position],
   );
   const surface = scene.room.surfaces[selectedSurface];
+  const externalCapture = scene.captureProvider === 'external-render'
+    ? audioDevices.find((device) => device.id.toLocaleLowerCase('en-US') === scene.captureEndpointId?.toLocaleLowerCase('en-US')) ?? null
+    : null;
+  const surroundUnavailable = scene.captureProvider !== 'external-render' || !supportsSurround5_1(externalCapture);
+  const pairedChannel = pairedSpeakerChannel(selected);
 
   const updateSpeaker = (id: Channel, update: Partial<SpeakerConfig>) => {
-    const speakers = scene.speakers.map((item) => (item.id === id ? { ...item, ...update } : item)) as [SpeakerConfig, SpeakerConfig];
+    const speakers = scene.speakers.map((item) => (item.id === id ? { ...item, ...update } : item)) as SpeakerSet;
     patchScene({ speakers });
   };
 
@@ -38,16 +46,30 @@ export function ScenePage() {
     const current = speakerPolarFromListener(speaker.position, scene.listener.position);
     const next = { ...current, [property]: value };
     const position = speakerPositionFromPolar(next, scene.listener.position, speaker.position.y);
-    let speakers = scene.speakers.map((item) => (item.id === selected ? { ...item, position } : item)) as [SpeakerConfig, SpeakerConfig];
-    if (linked) {
-      const otherId: Channel = selected === 'L' ? 'R' : 'L';
+    let speakers = scene.speakers.map((item) => (item.id === selected ? { ...item, position } : item)) as SpeakerSet;
+    if (linked && pairedChannel) {
+      const otherId = pairedChannel;
       speakers = speakers.map((item) =>
         item.id === otherId
           ? { ...item, position: { ...item.position, x: 2 * scene.listener.position.x - position.x, y: position.y, z: position.z } }
           : item,
-      ) as [SpeakerConfig, SpeakerConfig];
+      ) as SpeakerSet;
     }
     patchScene({ speakers });
+  };
+
+  const setInputLayout = (inputLayout: InputLayout) => {
+    if (inputLayout === '5.1-surround' && surroundUnavailable) {
+      notify({
+        tone: 'warning',
+        title: 'Source 5.1 indisponible',
+        detail: scene.captureProvider !== 'external-render'
+          ? 'Le mode 5.1 requiert une source externe explicitement sélectionnée.'
+          : `${externalCapture?.name ?? 'La source externe'} expose ${externalCapture?.channelCount ?? 0} canaux (masque 0x${(externalCapture?.channelMask ?? 0).toString(16).toUpperCase()}). Il faut exactement 6 canaux avec un masque 0x3F ou 0x60F, sans upmix automatique.`,
+      });
+      return;
+    }
+    patchScene({ inputLayout });
   };
 
   const toggleFullscreen = async () => {
@@ -95,8 +117,8 @@ export function ScenePage() {
       <section className="scene-stage panel">
         <div className="scene-toolbar">
           <div className="scene-legend">
-            <span><i className="legend-left" /> Canal gauche</span>
-            <span><i className="legend-right" /> Canal droit</span>
+            <span><i className="legend-left" /> Enceintes routées</span>
+            <span><i className="legend-unrouted" /> Non routées</span>
             <span><i className="legend-listener" /> Point d’écoute</span>
           </div>
           <button type="button" className="ghost-button compact" onClick={() => void toggleFullscreen()}><Maximize2 size={15} /> Plein écran</button>
@@ -107,6 +129,7 @@ export function ScenePage() {
             listener={scene.listener}
             room={scene.room}
             pose={tracking.pose}
+            inputLayout={scene.inputLayout}
             selectedSpeaker={selected}
             onSelectSpeaker={setSelected}
           />
@@ -165,27 +188,46 @@ export function ScenePage() {
             <div className="inspector-section">
               <div className="section-heading-row">
                 <div>
-                  <span className="eyebrow">GÉOMÉTRIE STÉRÉO</span>
+                  <span className="eyebrow">IMPLANTATION VIRTUELLE</span>
                   <h2>Placement</h2>
                 </div>
                 <button
                   type="button"
                   className={`icon-button small ${linked ? 'is-highlighted' : ''}`}
                   onClick={() => setLinked((value) => !value)}
-                  title={linked ? 'Dissocier les enceintes' : 'Lier symétriquement'}
+                  title={!pairedChannel ? 'Le canal central n’a pas de paire' : linked ? 'Dissocier la paire' : 'Lier symétriquement la paire'}
+                  disabled={!pairedChannel}
                 >
                   {linked ? <Link2 size={16} /> : <Unlink2 size={16} />}
                 </button>
               </div>
+              <div className="input-layout-control">
+                <span className="eyebrow">FORMAT D’ENTRÉE</span>
+                <SegmentedControl<InputLayout>
+                  ariaLabel="Format des canaux d’entrée"
+                  value={scene.inputLayout}
+                  onChange={setInputLayout}
+                  options={[
+                    { value: 'stereo', label: 'Stéréo' },
+                    {
+                      value: '5.1-surround',
+                      label: '5.1',
+                      disabled: surroundUnavailable,
+                      title: surroundUnavailable ? 'Le 5.1 requiert une source externe 6 canaux avec masque 0x3F ou 0x60F.' : undefined,
+                    },
+                  ]}
+                />
+                {surroundUnavailable && <small className="control-warning" role="status">5.1 disponible avec une source externe 6 canaux (masque 0x3F ou 0x60F) · aucun upmix.</small>}
+              </div>
               <div className="speaker-selector">
                 {scene.speakers.map((item) => (
-                  <button key={item.id} type="button" className={selected === item.id ? 'is-selected' : ''} onClick={() => setSelected(item.id)}>
+                  <button key={item.id} type="button" className={`${selected === item.id ? 'is-selected' : ''} ${!isSpeakerRouted(scene.inputLayout, item.id) ? 'is-unrouted' : ''}`} onClick={() => setSelected(item.id)}>
                     <i className={`speaker-color speaker-${item.id.toLowerCase()}`} />
-                    <span><strong>{item.id}</strong><small>{item.label}</small></span>
+                    <span><strong>{item.id}</strong><small>{!isSpeakerRouted(scene.inputLayout, item.id) ? 'Non routée en stéréo' : item.label}</small></span>
                   </button>
                 ))}
               </div>
-              <RangeControl label="Azimut" value={geometry.azimuth} min={-75} max={75} step={1} unit="°" onChange={(value) => updatePolar('azimuth', value)} hint="±30° correspond au triangle stéréo ITU-R." />
+              <RangeControl label="Azimut" value={geometry.azimuth} min={-180} max={180} step={1} unit="°" onChange={(value) => updatePolar('azimuth', value)} hint="Référence : L/R ±30°, C 0°, surrounds ±110°." />
               <RangeControl label="Distance" value={geometry.distance} min={0.7} max={5} step={0.1} unit="m" onChange={(value) => updatePolar('distance', value)} />
               <RangeControl
                 label="Hauteur"
@@ -198,6 +240,13 @@ export function ScenePage() {
               />
               <RangeControl label="Gain" value={speaker.gainDb} min={-12} max={6} step={0.5} unit="dB" onChange={(value) => updateSpeaker(selected, { gainDb: value })} />
               <Toggle checked={!speaker.muted} onChange={(checked) => updateSpeaker(selected, { muted: !checked })} label={`Canal ${selected} actif`} />
+              {scene.inputLayout === '5.1-surround' && (
+                <div className="lfe-editor">
+                  <span><small>LFE · EFFETS BASSE FRÉQUENCE</small><i>Canal non positionnel</i></span>
+                  <RangeControl label="Gain LFE" value={scene.lfe.gainDb} min={-12} max={6} step={0.5} unit="dB" onChange={(gainDb) => patchScene({ lfe: { ...scene.lfe, gainDb } })} />
+                  <Toggle checked={!scene.lfe.muted} onChange={(checked) => patchScene({ lfe: { ...scene.lfe, muted: !checked } })} label="Canal LFE actif" />
+                </div>
+              )}
             </div>
             <div className="inspector-note">
               <Sparkles size={16} />

@@ -1,7 +1,9 @@
 export const CONTRACT_VERSION = 1 as const;
+export const SCENE_CONFIG_VERSION = 2 as const;
 
 export type ViewId = 'assistant' | 'scene' | 'profiles' | 'diagnostics';
-export type Channel = 'L' | 'R';
+export type Channel = 'L' | 'R' | 'C' | 'LS' | 'RS';
+export type InputLayout = 'stereo' | '5.1-surround';
 export type TrackingState = 'tracked' | 'held' | 'returning' | 'lost';
 export type AudioMode = 'shared-low-latency' | 'exclusive-pro' | 'compatibility';
 export type CaptureProvider = 'native-driver' | 'external-render';
@@ -36,11 +38,24 @@ export interface HeadPoseSampleV1 {
   trackingState: TrackingState;
 }
 
-export interface SpeakerConfig {
-  id: Channel;
-  channel: Channel;
+export interface SpeakerConfig<C extends Channel = Channel> {
+  id: C;
+  channel: C;
   label: string;
   position: Vector3;
+  gainDb: number;
+  muted: boolean;
+}
+
+export type SpeakerSet = [
+  SpeakerConfig<'L'>,
+  SpeakerConfig<'R'>,
+  SpeakerConfig<'C'>,
+  SpeakerConfig<'LS'>,
+  SpeakerConfig<'RS'>,
+];
+
+export interface LfeConfig {
   gainDb: number;
   muted: boolean;
 }
@@ -88,9 +103,11 @@ export interface HeadphoneEqConfig {
   bands: HeadphoneEqBand[];
 }
 
-export interface SceneConfigV1 {
-  version: typeof CONTRACT_VERSION;
-  speakers: [SpeakerConfig, SpeakerConfig];
+export interface SceneConfigV2 {
+  version: typeof SCENE_CONFIG_VERSION;
+  inputLayout: InputLayout;
+  speakers: SpeakerSet;
+  lfe: LfeConfig;
   listener: ListenerConfig;
   hrtfProfileId: string;
   importedSofaHash: string | null;
@@ -113,6 +130,8 @@ export interface AudioDeviceSummary {
   isSoundSpatializerEndpoint: boolean;
   transport: 'usb' | 'jack' | 'bluetooth' | 'hdmi' | 'unknown';
   sampleRate: number;
+  channelCount: number;
+  channelMask: number;
 }
 
 export interface EngineStatusV1 {
@@ -121,6 +140,9 @@ export interface EngineStatusV1 {
   audioMode: AudioMode;
   /** Représentation réellement écrite dans le tampon du périphérique physique. */
   renderSampleFormat: 'unknown' | 'float32' | 'pcm-s32';
+  inputLayout: InputLayout;
+  captureChannels: number;
+  captureChannelMask: number;
   connection: EngineConnectionState;
   captureActive: boolean;
   renderActive: boolean;
@@ -158,7 +180,7 @@ export type EngineCommandV1 =
     }
   | { version: 1; type: 'set-audio-mode'; mode: AudioMode }
   | { version: 1; type: 'calibrate-neutral-pose'; quaternion: Quaternion }
-  | { version: 1; type: 'set-scene'; scene: SceneConfigV1 }
+  | { version: 1; type: 'set-scene'; scene: SceneConfigV2 }
   | { version: 1; type: 'set-hrtf'; profileId: string; sofaPath: string | null }
   | { version: 1; type: 'set-headphone-eq'; eq: HeadphoneEqConfig };
 
@@ -183,9 +205,9 @@ export interface AppPreferences {
   showCameraPreview: boolean;
 }
 
-export interface PersistedAppConfigV1 {
-  schemaVersion: 1;
-  scene: SceneConfigV1;
+export interface PersistedAppConfigV2 {
+  schemaVersion: 2;
+  scene: SceneConfigV2;
   preferences: AppPreferences;
 }
 

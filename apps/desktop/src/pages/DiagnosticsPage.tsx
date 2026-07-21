@@ -23,8 +23,10 @@ export function DiagnosticsPage() {
     ? audioDevices.find((device) => device.isSoundSpatializerEndpoint) ?? null
     : audioDevices.find((device) => sameAudioEndpoint(device.id, scene.captureEndpointId)) ?? null;
   const captureTitle = scene.captureProvider === 'native-driver' ? 'Capture pilote natif' : 'Capture endpoint externe';
+  const inputLayoutLabel = engine.inputLayout === '5.1-surround' ? '5.1 surround' : 'stéréo';
+  const captureMask = `0x${engine.captureChannelMask.toString(16).toUpperCase()}`;
   const captureDetail = captureEndpoint
-    ? `${captureEndpoint.name} · ${captureEndpoint.sampleRate / 1000} kHz · ${engine.capturePeriodMs.toFixed(2)} ms`
+    ? `${captureEndpoint.name} · ${engine.captureChannels} canaux · masque ${captureMask} · ${captureEndpoint.sampleRate / 1000} kHz · ${engine.capturePeriodMs.toFixed(2)} ms`
     : scene.captureProvider === 'native-driver' ? 'Endpoint Sound Spatializer indisponible' : 'Source externe indisponible';
 
   useEffect(() => {
@@ -115,7 +117,7 @@ export function DiagnosticsPage() {
           <div className="signal-list">
             <SignalRow icon={<Waves size={17} />} title={captureTitle} detail={captureDetail} active={engine.captureActive} preview={preview} />
             <SignalRow icon={<Activity size={17} />} title="Pose exploitable par le moteur" detail={engine.trackingActive ? `${engine.trackingHz.toFixed(1)} échantillons/s` : 'Aucune pose exploitable'} active={engine.trackingActive} preview={preview} />
-            <SignalRow icon={<Radio size={17} />} title="Convolution HRTF" detail="Matrice dynamique 2 × 2" active={engine.connection === 'ready'} preview={preview} />
+            <SignalRow icon={<Radio size={17} />} title="Convolution HRTF" detail={`Matrice dynamique ${engine.inputLayout === '5.1-surround' ? '5 × 2' : '2 × 2'}`} active={engine.connection === 'ready'} preview={preview} />
             <SignalRow icon={<Gauge size={17} />} title="FIFO & ASRC" detail={`${engine.fifoFillPercent.toFixed(0)} % · ${engine.clockDriftPpm.toFixed(1)} ppm`} active={engine.renderActive} preview={preview} />
             <SignalRow icon={<Headphones size={17} />} title="Rendu casque" detail={engine.physicalOutputName ?? 'Aucune sortie mesurée'} active={engine.renderActive} preview={preview} last />
           </div>
@@ -126,7 +128,8 @@ export function DiagnosticsPage() {
         <section className="telemetry-table panel">
           <div className="section-heading-row"><div><span className="eyebrow">TÉLÉMÉTRIE LOCALE</span><h2>Horloges et tampons</h2></div><StatusDot state={engine.xruns ? 'warning' : engine.connection === 'ready' ? 'active' : 'offline'} label={engine.xruns ? `${engine.xruns} xruns` : 'Aucun xrun'} /></div>
           <dl>
-            <div><dt>Format de travail</dt><dd>Float32 · stéréo · {engine.sampleRate / 1000} kHz</dd></div>
+            <div><dt>Format de travail</dt><dd>Float32 · {inputLayoutLabel} · {engine.sampleRate / 1000} kHz</dd></div>
+            <div><dt>Capture effective</dt><dd>{engine.captureChannels} canaux · masque {captureMask}</dd></div>
             <div><dt>Sortie WASAPI</dt><dd>{engine.renderSampleFormat === 'pcm-s32' ? 'PCM32 signé' : engine.renderSampleFormat === 'float32' ? 'Float32' : '—'} · stéréo · {engine.sampleRate / 1000} kHz</dd></div>
             <div><dt>Période capture</dt><dd>{engine.capturePeriodMs.toFixed(2)} ms</dd></div>
             <div><dt>Période rendu</dt><dd>{engine.renderPeriodMs.toFixed(2)} ms</dd></div>
@@ -159,6 +162,7 @@ function routeDiagnosticDetail(provider: ReturnType<typeof useAppStore.getState>
   if (issue === 'desktop-runtime-required') return 'La capture WASAPI est disponible uniquement dans l’application de bureau Windows.';
   if (issue === 'capture-equals-output') return 'La source et la sortie sont identiques. Choisissez deux endpoints différents pour éviter une boucle audio.';
   if (issue === 'capture-endpoint-unavailable') return 'L’endpoint de rendu externe enregistré n’est plus actif. Rebranchez-le ou sélectionnez une autre source dans l’assistant.';
+  if (issue === 'capture-layout-unsupported') return 'Le format 5.1 exige une source externe de six canaux avec masque 0x3F ou 0x60F. Aucun upmix n’est effectué.';
   if (issue === 'output-endpoint-unavailable' || issue === 'output-endpoint-required') return 'Le casque physique doit être sélectionné et actif avant le démarrage du moteur.';
   if (provider === 'external-render') return 'Choisissez explicitement un endpoint de rendu externe actif et un casque différent dans l’assistant.';
   return 'Installez le pilote natif ou choisissez un endpoint de rendu externe dans l’assistant. Le suivi facial reste disponible.';

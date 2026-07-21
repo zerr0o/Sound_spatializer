@@ -41,7 +41,7 @@ All commands contain `{"schemaVersion":1,"type":"..."}` plus the fields below.
 | `set-audio-route` | `captureProvider: native-driver \| external-render`, `captureEndpointId: string\|null`, `outputDeviceId: string` |
 | `set-audio-mode` | `mode: shared-low-latency \| exclusive-pro \| compatibility` |
 | `calibrate-neutral-pose` | `quaternion: [w,x,y,z]` |
-| `set-scene` | `scene: SceneConfigV1` |
+| `set-scene` | `scene: SceneConfigV2` |
 | `set-hrtf` | `profileId: string`, `sofaPath: string|null` |
 | `set-headphone-eq` | `eq: {enabled,preampDb,bands}` |
 
@@ -55,11 +55,13 @@ The source and physical output must resolve to different endpoints. An invalid,
 missing or looped route is rejected without partially persisting or activating
 it and without silently falling back to another endpoint.
 
-The optional `SceneConfigV1.audio.captureProvider` and `captureEndpointId`
-properties carry the same tuple for `set-scene`. When both are absent, readers
-must interpret them as `native-driver` and `null` for backward compatibility.
-The `audio.mode` value `compatibility` remains only the 256-frame buffer target;
-it does not select an external endpoint.
+The V2 scene carries `audio.inputLayout`, five ordered positional speakers and a
+separate LFE object. Speaker and LFE activation is transported as `enabled`.
+`5.1-surround` requires an explicit `external-render` endpoint; activation is
+refused unless that endpoint exposes exactly six channels with mask `0x3F` or
+`0x60F`. No stereo upmix is performed. V1 remains readable only for migration;
+its optional capture fields default to `native-driver` and `null`. The
+`audio.mode` value `compatibility` remains only the 256-frame buffer target.
 
 The Tauri host resolves a bundled profile ID to a verified local SOFA path before
 sending `set-scene` or `set-hrtf`. The native engine does not trust a display name
@@ -69,7 +71,8 @@ as proof that a profile is installed.
 
 `EngineStatusV1` is a flat JSON object containing `schemaVersion: 1`, capture and
 render states, tracking state, the effective `audioMode`, the effective
-`renderSampleFormat` (`unknown`, `float32` or `pcm-s32`), both sample rates and periods, FIFO fill, xrun
+`renderSampleFormat` (`unknown`, `float32` or `pcm-s32`), `inputLayout`,
+`captureChannels`, `captureChannelMask`, both sample rates and periods, FIFO fill, xrun
 count, callback load, tracking rate, software latency percentiles, ASRC ratio and
 the last diagnostic error. It also carries `potentiallyBinaural`, a bounded,
 hysteretic warning heuristic; it never changes routing or enables bypass without

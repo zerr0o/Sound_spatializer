@@ -23,6 +23,8 @@ const physicalDevice: AudioDeviceSummary = {
   isSoundSpatializerEndpoint: false,
   transport: 'usb',
   sampleRate: 48_000,
+  channelCount: 2,
+  channelMask: 0x3,
 };
 
 const externalDevice: AudioDeviceSummary = {
@@ -32,6 +34,8 @@ const externalDevice: AudioDeviceSummary = {
   isSoundSpatializerEndpoint: false,
   transport: 'unknown',
   sampleRate: 48_000,
+  channelCount: 2,
+  channelMask: 0x3,
 };
 
 const alternativeExternalDevice: AudioDeviceSummary = {
@@ -41,6 +45,8 @@ const alternativeExternalDevice: AudioDeviceSummary = {
   isSoundSpatializerEndpoint: false,
   transport: 'unknown',
   sampleRate: 48_000,
+  channelCount: 2,
+  channelMask: 0x3,
 };
 
 const nativeDevice: AudioDeviceSummary = {
@@ -50,6 +56,8 @@ const nativeDevice: AudioDeviceSummary = {
   isSoundSpatializerEndpoint: true,
   transport: 'unknown',
   sampleRate: 48_000,
+  channelCount: 2,
+  channelMask: 0x3,
 };
 
 const setAssistantState = (

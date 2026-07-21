@@ -22,11 +22,11 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { StepMarker } from '../components/ui/Controls';
-import { deriveRuntimeCapabilities, routeSelectionFromScene, sameAudioEndpoint, type AudioRouteIssue, type RuntimeCapabilities } from '../lib/runtime-capabilities';
+import { deriveRuntimeCapabilities, routeSelectionFromScene, sameAudioEndpoint, supportsSurround5_1, type AudioRouteIssue, type RuntimeCapabilities } from '../lib/runtime-capabilities';
 import { desktopBridge, isTauriRuntime } from '../lib/tauri-bridge';
 import { useAppStore } from '../store/app-store';
 import { useTrackingController } from '../tracking/TrackingProvider';
-import type { AudioDeviceSummary, CaptureProvider, EngineCommandV1, SceneConfigV1 } from '../types/contracts';
+import type { AudioDeviceSummary, CaptureProvider, EngineCommandV1, SceneConfigV2 } from '../types/contracts';
 
 const STEPS = [
   { label: 'Bienvenue', short: 'Préparation' },
@@ -38,6 +38,7 @@ const STEPS = [
 const routeIssueTitle = (issue: AudioRouteIssue | null): string => {
   if (issue === 'native-endpoint-unavailable') return 'Pilote natif indisponible';
   if (issue === 'capture-endpoint-required' || issue === 'capture-endpoint-unavailable') return 'Source audio à sélectionner';
+  if (issue === 'capture-layout-unsupported') return 'Source 5.1 incompatible';
   if (issue === 'output-endpoint-required' || issue === 'output-endpoint-unavailable') return 'Casque à sélectionner';
   if (issue === 'capture-equals-output') return 'Boucle audio bloquée';
   if (issue === 'desktop-runtime-required') return 'Aperçu sans capture système';
@@ -51,6 +52,7 @@ const routeIssueDetail = (issue: AudioRouteIssue | null): string => {
     case 'capture-endpoint-required': return 'Choisissez l’endpoint de rendu fourni par votre câble audio virtuel.';
     case 'capture-endpoint-unavailable': return 'La source externe enregistrée a disparu. Rebranchez-la ou sélectionnez-en une autre.';
     case 'capture-endpoint-is-native': return 'Le mode externe ne peut pas cibler l’endpoint du pilote Sound Spatializer.';
+    case 'capture-layout-unsupported': return 'Le 5.1 requiert une source externe de six canaux exactement, avec un masque 0x3F ou 0x60F.';
     case 'output-endpoint-required': return 'Choisissez le casque physique qui recevra le son spatialisé.';
     case 'output-endpoint-unavailable': return 'Le casque enregistré n’est plus actif. Rebranchez-le ou sélectionnez-en un autre.';
     case 'output-endpoint-is-native': return 'Sound Spatializer est une source de capture et ne peut jamais être la sortie du moteur.';
@@ -59,7 +61,7 @@ const routeIssueDetail = (issue: AudioRouteIssue | null): string => {
   }
 };
 
-const audioRouteCommand = (scene: SceneConfigV1): EngineCommandV1 => {
+const audioRouteCommand = (scene: SceneConfigV2): EngineCommandV1 => {
   if (!scene.physicalOutputDeviceId) throw new Error('Aucune sortie physique n’est sélectionnée.');
   return {
     version: 1,
@@ -71,7 +73,7 @@ const audioRouteCommand = (scene: SceneConfigV1): EngineCommandV1 => {
 };
 
 const canContinueAudioStep = (
-  scene: SceneConfigV1,
+  scene: SceneConfigV2,
   capabilities: RuntimeCapabilities,
 ): boolean => capabilities.audioRouteReady || (
   scene.captureProvider === 'native-driver'
@@ -97,7 +99,7 @@ export function AssistantPage() {
   const step = Math.max(0, Math.min(STEPS.length - 1, preferences.onboardingStep));
   const capabilities = useMemo(
     () => deriveRuntimeCapabilities(isTauriRuntime(), devices, routeSelectionFromScene(scene)),
-    [devices, scene.captureEndpointId, scene.captureProvider, scene.physicalOutputDeviceId],
+    [devices, scene.captureEndpointId, scene.captureProvider, scene.inputLayout, scene.physicalOutputDeviceId],
   );
   const selectedOutput = capabilities.outputEndpoint;
   const selectedCapture = scene.captureProvider === 'external-render' ? capabilities.captureEndpoint : null;
@@ -153,7 +155,7 @@ export function AssistantPage() {
     }
   };
 
-  const applyAudioRoute = async (patch: Partial<SceneConfigV1>) => {
+  const applyAudioRoute = async (patch: Partial<SceneConfigV2>) => {
     // Une route atomique doit partir d’un seul instantané. Sans ce verrou,
     // deux clics rapides peuvent chacun fusionner leur patch avec l’ancien
     // store et produire une source identique à la sortie.
@@ -183,12 +185,20 @@ export function AssistantPage() {
   };
 
   const selectCaptureProvider = (captureProvider: CaptureProvider) => {
-    void applyAudioRoute({ captureProvider, captureEndpointId: null });
+    void applyAudioRoute({
+      captureProvider,
+      captureEndpointId: null,
+      ...(captureProvider === 'native-driver' ? { inputLayout: 'stereo' as const } : {}),
+    });
   };
 
   const selectCaptureEndpoint = (device: AudioDeviceSummary) => {
     if (device.isSoundSpatializerEndpoint || sameAudioEndpoint(device.id, scene.physicalOutputDeviceId)) return;
-    void applyAudioRoute({ captureProvider: 'external-render', captureEndpointId: device.id });
+    void applyAudioRoute({
+      captureProvider: 'external-render',
+      captureEndpointId: device.id,
+      ...(scene.inputLayout === '5.1-surround' && !supportsSurround5_1(device) ? { inputLayout: 'stereo' as const } : {}),
+    });
   };
 
   const selectOutputEndpoint = (device: AudioDeviceSummary) => {

@@ -7,7 +7,7 @@ import type {
   HeadPoseSampleV1,
   ImportedHeadphoneEq,
   ImportedSofa,
-  PersistedAppConfigV1,
+  PersistedAppConfigV2,
   QpcSnapshot,
 } from '../types/contracts';
 import { demoAudioDevices, emptyEngineStatus } from '../data/defaults';
@@ -16,7 +16,8 @@ import { LatestValueQueue } from './latest-value-queue';
 
 export const isTauriRuntime = () => '__TAURI_INTERNALS__' in window;
 
-const CONFIG_KEY = 'sound-spatializer.config.v1';
+const CONFIG_KEY_V2 = 'sound-spatializer.config.v2';
+const CONFIG_KEY_V1 = 'sound-spatializer.config.v1';
 type PoseDeliveryListener = (error: unknown | null) => void;
 const poseDeliveryListeners = new Set<PoseDeliveryListener>();
 const poseQueue = new LatestValueQueue<Uint8Array>(
@@ -32,19 +33,19 @@ const poseQueue = new LatestValueQueue<Uint8Array>(
 );
 
 export const desktopBridge = {
-  async loadConfig(): Promise<PersistedAppConfigV1 | null> {
+  async loadConfig(): Promise<PersistedAppConfigV2 | null> {
     if (!isTauriRuntime()) {
-      const value = window.localStorage.getItem(CONFIG_KEY);
+      const value = window.localStorage.getItem(CONFIG_KEY_V2) ?? window.localStorage.getItem(CONFIG_KEY_V1);
       return value ? migratePersistedConfig(JSON.parse(value)) : null;
     }
     const value = await invoke<string | null>('load_app_config');
     return value ? migratePersistedConfig(JSON.parse(value)) : null;
   },
 
-  async saveConfig(config: PersistedAppConfigV1): Promise<void> {
+  async saveConfig(config: PersistedAppConfigV2): Promise<void> {
     const payload = JSON.stringify(toPersistedDesktopConfig(config));
     if (!isTauriRuntime()) {
-      window.localStorage.setItem(CONFIG_KEY, payload);
+      window.localStorage.setItem(CONFIG_KEY_V2, payload);
       return;
     }
     await invoke('save_app_config', { payload });

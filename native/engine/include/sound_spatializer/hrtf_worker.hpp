@@ -15,8 +15,9 @@ struct HrtfPreparationRequest {
     std::uint64_t generation{};
     std::uint64_t scene_revision{};
     const IHrtfDatabase* database{};
-    std::array<Vec3f, 2> head_relative_directions{};
-    std::array<float, 2> speaker_gains{};
+    std::array<Vec3f, kDirectionalSourceCount> head_relative_directions{};
+    std::array<float, kDirectionalSourceCount> speaker_gains{};
+    std::size_t source_count{2};
     Quaternionf world_to_head{};
     bool room_enabled{};
 };

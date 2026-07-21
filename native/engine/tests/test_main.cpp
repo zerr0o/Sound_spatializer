@@ -130,6 +130,35 @@ void test_endpoint_contract_selection() {
     CHECK(audio_reconnect_backoff_ms(100) == 2'000);
 }
 
+void test_surround_input_contracts() {
+    CHECK(kStereoChannelMask == 0x0000'0003U);
+    CHECK(kSurround51BackChannelMask == 0x0000'003FU);
+    CHECK(kSurround51ChannelMask == 0x0000'060FU);
+    CHECK(is_supported_surround_5_1_channel_mask(kSurround51BackChannelMask));
+    CHECK(is_supported_surround_5_1_channel_mask(kSurround51ChannelMask));
+    CHECK(!is_supported_surround_5_1_channel_mask(kStereoChannelMask));
+    CHECK(!is_supported_surround_5_1_channel_mask(0U));
+    CHECK(!is_supported_surround_5_1_channel_mask(0x0000'063FU));
+    CHECK(expected_input_channel_count(InputLayout::stereo) == 2U);
+    CHECK(expected_input_channel_count(InputLayout::surround_5_1) == 6U);
+
+    AudioBackendConfig native_surround{};
+    native_surround.capture_provider = CaptureProvider::native_driver;
+    native_surround.input_layout = InputLayout::surround_5_1;
+    native_surround.physical_output_endpoint_id = "headphones";
+    std::string error;
+    CHECK(!validate_audio_backend_config(native_surround, error));
+    CHECK(error.find("external render endpoint") != std::string::npos);
+
+    AudioBackendConfig external_surround{};
+    external_surround.capture_provider = CaptureProvider::external_render;
+    external_surround.capture_endpoint_id = "vb-cable-5.1";
+    external_surround.physical_output_endpoint_id = "headphones";
+    external_surround.input_layout = InputLayout::surround_5_1;
+    CHECK(validate_audio_backend_config(external_surround, error));
+    CHECK(error.empty());
+}
+
 void test_wasapi_period_and_capture_budget_policy() {
     constexpr std::uint32_t default_mxcsr = 0x1F80U;
     constexpr std::uint32_t realtime_mxcsr = realtime_mxcsr_with_ftz_daz(default_mxcsr);
@@ -662,6 +691,36 @@ void test_convolver_and_morph() {
         CHECK(std::abs(faded[index].left - faded[index - 1].left) <= 0.07F);
 }
 
+void test_five_source_two_ear_convolver_channel_isolation() {
+    HrirFilterBank bank{};
+    bank.tap_count = 1;
+    bank.source_count = kDirectionalSourceCount;
+    for (std::size_t source = 0; source < kDirectionalSourceCount; ++source) {
+        // Unique gains and opposite signs make both source-index and ear-index
+        // swaps visible without relying on energy-only comparisons.
+        bank.path(source, 0)[0] = 0.125F * static_cast<float>(source + 1U);
+        bank.path(source, 1)[0] = -0.0625F * static_cast<float>(source + 1U);
+    }
+
+    BinauralConvolver convolver;
+    CHECK(convolver.set_filters(bank, 0));
+    for (std::size_t source = 0; source < kDirectionalSourceCount; ++source) {
+        convolver.reset();
+        DirectionalFrame impulse{};
+        impulse.sources[source] = 1.0F;
+        StereoFrame output{};
+        convolver.process(&impulse, &output, 1);
+        CHECK_NEAR(output.left, bank.path(source, 0)[0], 1.0e-6F);
+        CHECK_NEAR(output.right, bank.path(source, 1)[0], 1.0e-6F);
+
+        DirectionalFrame silence{};
+        StereoFrame tail{1.0F, 1.0F};
+        convolver.process(&silence, &tail, 1);
+        CHECK_NEAR(tail.left, 0.0F, 1.0e-6F);
+        CHECK_NEAR(tail.right, 0.0F, 1.0e-6F);
+    }
+}
+
 void test_partitioned_convolver_matches_time_domain_reference() {
     constexpr std::size_t filter_taps = 1'201;
     constexpr std::size_t programme_frames = 1'537;
@@ -787,6 +846,47 @@ void test_partitioned_convolver_morph_and_interruption() {
     CHECK(scene_frames_remaining == 4'672);
     CHECK(convolver.set_filters(second, scene_frames_remaining));
     CHECK(convolver.morph_remaining_frames() == scene_frames_remaining);
+}
+
+void test_lfe_symmetric_low_pass_and_downmix() {
+    LfeRenderer impulse_renderer;
+    impulse_renderer.prepare(static_cast<float>(kSampleRate));
+    impulse_renderer.configure(true, 0.0F);
+    double impulse_energy = 0.0;
+    for (std::size_t frame = 0; frame < 2'048; ++frame) {
+        const float filtered = impulse_renderer.process_sample(frame == 0 ? 1.0F : 0.0F);
+        const StereoFrame downmixed = downmix_programme_to_stereo({}, filtered);
+        CHECK_NEAR(downmixed.left, downmixed.right, 1.0e-7F);
+        CHECK_NEAR(downmixed.left, filtered * 0.70710678F, 1.0e-7F);
+        impulse_energy += static_cast<double>(filtered) * filtered;
+    }
+    CHECK(impulse_energy > 0.0);
+
+    const auto steady_state_rms = [](float frequency_hz) {
+        LfeRenderer renderer;
+        renderer.prepare(static_cast<float>(kSampleRate));
+        renderer.configure(true, 0.0F);
+        constexpr std::size_t total_frames = kSampleRate;
+        constexpr std::size_t measured_frames = kSampleRate / 2U;
+        double energy = 0.0;
+        for (std::size_t frame = 0; frame < total_frames; ++frame) {
+            const float phase = 2.0F * kPi * frequency_hz * static_cast<float>(frame) /
+                                static_cast<float>(kSampleRate);
+            const float filtered = renderer.process_sample(std::sin(phase));
+            if (frame >= total_frames - measured_frames)
+                energy += static_cast<double>(filtered) * filtered;
+        }
+        return std::sqrt(energy / static_cast<double>(measured_frames));
+    };
+    const double bass_rms = steady_state_rms(60.0F);
+    const double out_of_band_rms = steady_state_rms(1'000.0F);
+    CHECK(bass_rms > 0.5);
+    CHECK(out_of_band_rms < bass_rms * 0.01);
+
+    LfeRenderer disabled;
+    disabled.prepare(static_cast<float>(kSampleRate));
+    disabled.configure(false, 0.0F);
+    CHECK_NEAR(disabled.process_sample(1.0F), 0.0F, 1.0e-7F);
 }
 
 void test_eq_and_limiter() {
@@ -966,6 +1066,49 @@ void test_polyphase_resampler_quality_and_drift() {
     CHECK(measured > 1.0008F && measured < 1.0012F);
 }
 
+void test_programme_resampler_channel_isolation() {
+    constexpr std::size_t source_frames = 512;
+    constexpr std::size_t rendered_frames = 256;
+    for (std::size_t active_channel = 0; active_channel < kProgrammeChannelCount; ++active_channel) {
+        std::array<ProgrammeFrame, source_frames> source{};
+        for (std::size_t frame = 0; frame < source.size(); ++frame) {
+            const float phase = 2.0F * kPi * 1'000.0F * static_cast<float>(frame) /
+                                static_cast<float>(kSampleRate);
+            source[frame][active_channel] = std::sin(phase);
+        }
+
+        AsyncProgrammeResampler resampler(1'024);
+        CHECK(resampler.push(source.data(), source.size()) == source.size());
+        // Priming consumes nine future samples. Matching that post-prime fill
+        // keeps the unity-ratio path free from drift-controller correction.
+        resampler.set_target_fill(source.size() - 9U);
+        std::array<ProgrammeFrame, rendered_frames> output{};
+        CHECK(resampler.render(output.data(), output.size(), static_cast<float>(kSampleRate)) ==
+              output.size());
+
+        double peak_signal_error = 0.0;
+        double peak_crosstalk = 0.0;
+        double signal_energy = 0.0;
+        for (std::size_t frame = 16; frame < output.size() - 16U; ++frame) {
+            peak_signal_error = std::max(
+                peak_signal_error,
+                std::abs(static_cast<double>(output[frame][active_channel] -
+                                             source[frame][active_channel])));
+            signal_energy += static_cast<double>(output[frame][active_channel]) *
+                             output[frame][active_channel];
+            for (std::size_t channel = 0; channel < kProgrammeChannelCount; ++channel) {
+                if (channel == active_channel) continue;
+                peak_crosstalk = std::max(
+                    peak_crosstalk,
+                    std::abs(static_cast<double>(output[frame][channel])));
+            }
+        }
+        CHECK(signal_energy > 1.0);
+        CHECK(peak_signal_error < 1.0e-4);
+        CHECK(peak_crosstalk < 1.0e-7);
+    }
+}
+
 void test_resampler_xrun_event_telemetry() {
     AsyncStereoResampler resampler(32);
     std::array<StereoFrame, 64> output{};
@@ -1130,8 +1273,129 @@ void test_order3_binaural_decoder_and_rotation() {
     CHECK(onset(itd_output, true) == 12);
 }
 
+void test_scene_v1_migration_and_v2_roundtrip() {
+    constexpr std::string_view legacy_scene = R"json({
+        "schemaVersion": 1,
+        "audio": {
+            "outputDeviceId": "legacy-headphones",
+            "mode": "shared-low-latency",
+            "sampleRate": 48000,
+            "bufferFrames": 128,
+            "bypass": false,
+            "masterGainDb": -6,
+            "roomMix": 0.18
+        },
+        "tracking": {
+            "enabled": true,
+            "cameraDeviceId": null,
+            "minimumFps": 60,
+            "predictionLimitMs": 20
+        },
+        "listener": {
+            "positionM": [0, 1.2, 0],
+            "neutralOrientation": [1, 0, 0, 0]
+        },
+        "speakers": [
+            {"channel": "left", "positionM": [-1.25, 1.2, 1.5], "gainDb": -60},
+            {"channel": "right", "positionM": [1.25, 1.2, 1.5], "gainDb": -3}
+        ],
+        "hrtf": {"profileId": "builtin-analytic-neutral", "sofaPath": null},
+        "headphoneEq": {"enabled": false, "preampDb": -6, "filters": []},
+        "room": {
+            "enabled": false,
+            "dimensionsM": [5, 2.7, 4],
+            "surfaces": [
+                {"materialId": "wall-left", "absorption": [0.1, 0.2, 0.3], "diffusion": [0.1, 0.1, 0.1]},
+                {"materialId": "wall-right", "absorption": [0.1, 0.2, 0.3], "diffusion": [0.1, 0.1, 0.1]},
+                {"materialId": "wall-front", "absorption": [0.1, 0.2, 0.3], "diffusion": [0.1, 0.1, 0.1]},
+                {"materialId": "wall-back", "absorption": [0.1, 0.2, 0.3], "diffusion": [0.1, 0.1, 0.1]},
+                {"materialId": "floor", "absorption": [0.1, 0.2, 0.3], "diffusion": [0.1, 0.1, 0.1]},
+                {"materialId": "ceiling", "absorption": [0.1, 0.2, 0.3], "diffusion": [0.1, 0.1, 0.1]}
+            ],
+            "earlyReflectionOrder": 2,
+            "earlyReflectionLimitMs": 80,
+            "lateReverbEnabled": true
+        }
+    })json";
+
+    const auto migrated = scene_config_from_json(legacy_scene);
+    CHECK(migrated);
+    if (migrated) {
+        CHECK(migrated.value->schema_version == 2U);
+        CHECK(migrated.value->audio.capture_provider == CaptureProvider::native_driver);
+        CHECK(!migrated.value->audio.capture_endpoint_id);
+        CHECK(migrated.value->audio.input_layout == InputLayout::stereo);
+        CHECK(migrated.value->audio.output_device_id ==
+              std::optional<std::string>("legacy-headphones"));
+        CHECK(migrated.value->speakers[0].channel == SpeakerChannel::front_left);
+        CHECK(migrated.value->speakers[1].channel == SpeakerChannel::front_right);
+        CHECK(!migrated.value->speakers[0].enabled);
+        CHECK(migrated.value->speakers[1].enabled);
+        CHECK_NEAR(migrated.value->speakers[0].position_m.x, -1.25F, 1.0e-6F);
+        CHECK_NEAR(migrated.value->speakers[1].gain_db, -3.0F, 1.0e-6F);
+        CHECK(migrated.value->speakers[2].channel == SpeakerChannel::front_center);
+        CHECK(migrated.value->speakers[3].channel == SpeakerChannel::surround_left);
+        CHECK(migrated.value->speakers[4].channel == SpeakerChannel::surround_right);
+
+        const std::string migrated_json = scene_config_to_json(*migrated.value);
+        CHECK(migrated_json.find("\"schemaVersion\":2") != std::string::npos);
+        CHECK(migrated_json.find("\"inputLayout\":\"stereo\"") != std::string::npos);
+        CHECK(migrated_json.find("\"front-center\"") != std::string::npos);
+        CHECK(migrated_json.find("\"lfe\":") != std::string::npos);
+        const auto reparsed = scene_config_from_json(migrated_json);
+        CHECK(reparsed);
+        if (reparsed) {
+            CHECK(reparsed.value->schema_version == 2U);
+            CHECK(reparsed.value->audio.input_layout == InputLayout::stereo);
+            CHECK(!reparsed.value->speakers[0].enabled);
+            CHECK(reparsed.value->speakers[4].channel == SpeakerChannel::surround_right);
+        }
+    }
+
+    SceneConfigV2 surround{};
+    surround.audio.capture_provider = CaptureProvider::external_render;
+    surround.audio.capture_endpoint_id = "vb-cable-5.1";
+    surround.audio.output_device_id = "usb-headphones";
+    surround.audio.input_layout = InputLayout::surround_5_1;
+    surround.audio.master_gain_db = -9.0F;
+    surround.lfe.enabled = false;
+    surround.lfe.gain_db = -4.5F;
+    surround.speakers[2].enabled = false;
+    surround.speakers[3].gain_db = -2.0F;
+    surround.speakers[4].position_m.z = -1.25F;
+    std::string validation_error;
+    CHECK(validate_scene_config(surround, validation_error));
+    const std::string v2_json = scene_config_to_json(surround);
+    const auto v2_roundtrip = scene_config_from_json(v2_json);
+    CHECK(v2_roundtrip);
+    if (v2_roundtrip) {
+        CHECK(v2_roundtrip.value->schema_version == 2U);
+        CHECK(v2_roundtrip.value->audio.capture_provider == CaptureProvider::external_render);
+        CHECK(v2_roundtrip.value->audio.capture_endpoint_id ==
+              std::optional<std::string>("vb-cable-5.1"));
+        CHECK(v2_roundtrip.value->audio.output_device_id ==
+              std::optional<std::string>("usb-headphones"));
+        CHECK(v2_roundtrip.value->audio.input_layout == InputLayout::surround_5_1);
+        CHECK_NEAR(v2_roundtrip.value->audio.master_gain_db, -9.0F, 1.0e-6F);
+        CHECK(!v2_roundtrip.value->lfe.enabled);
+        CHECK_NEAR(v2_roundtrip.value->lfe.gain_db, -4.5F, 1.0e-6F);
+        for (std::size_t source = 0; source < kDirectionalSourceCount; ++source) {
+            CHECK(v2_roundtrip.value->speakers[source].channel == surround.speakers[source].channel);
+            CHECK(v2_roundtrip.value->speakers[source].enabled == surround.speakers[source].enabled);
+            CHECK_NEAR(v2_roundtrip.value->speakers[source].gain_db,
+                       surround.speakers[source].gain_db, 1.0e-6F);
+            CHECK_NEAR(v2_roundtrip.value->speakers[source].position_m.x,
+                       surround.speakers[source].position_m.x, 1.0e-6F);
+            CHECK_NEAR(v2_roundtrip.value->speakers[source].position_m.y,
+                       surround.speakers[source].position_m.y, 1.0e-6F);
+            CHECK_NEAR(v2_roundtrip.value->speakers[source].position_m.z,
+                       surround.speakers[source].position_m.z, 1.0e-6F);
+        }
+    }
+}
+
 void test_json_and_ui_commands() {
-    SceneConfigV1 scene{};
+    SceneConfigV2 scene{};
     scene.headphone_eq.preamp_db = -6.0F;
     scene.room.late_reverb_enabled = false;
     const std::string json = scene_config_to_json(scene);
@@ -1158,7 +1422,7 @@ void test_json_and_ui_commands() {
         CHECK(!legacy_parsed.value->audio.capture_endpoint_id);
     }
 
-    SceneConfigV1 external_scene = scene;
+    SceneConfigV2 external_scene = scene;
     external_scene.audio.capture_provider = CaptureProvider::external_render;
     external_scene.audio.capture_endpoint_id = "external-source";
     external_scene.audio.output_device_id = "usb-headphones";
@@ -1207,7 +1471,7 @@ void test_json_and_ui_commands() {
     CHECK(status_json.find("\"latencyP95Ms\"") != std::string::npos);
     CHECK(status_json.find("\"potentiallyBinaural\":false") != std::string::npos);
 
-    SceneConfigV1 boundary = scene;
+    SceneConfigV2 boundary = scene;
     boundary.room.enabled = true;
     boundary.listener.position_m.x = boundary.room.dimensions_m.x * 0.5F;
     std::string validation_error;
@@ -1424,7 +1688,7 @@ void test_atomic_audio_route_command() {
     auto backend = std::make_unique<RouteRecordingBackend>();
     RouteRecordingBackend* recorder = backend.get();
     auto engine = std::make_unique<SpatialAudioEngine>(std::move(backend));
-    SceneConfigV1 initial = engine->scene();
+    SceneConfigV2 initial = engine->scene();
     initial.audio.output_device_id = "initial-headphones";
     std::string error;
     CHECK(engine->set_scene(initial, error));
@@ -1445,7 +1709,7 @@ void test_atomic_audio_route_command() {
     CHECK(recorder->start_count == 2);
     CHECK(recorder->running());
 
-    const SceneConfigV1 working_route = engine->scene();
+    const SceneConfigV2 working_route = engine->scene();
     recorder->fail_next_start = true;
     route.capture_endpoint_id = "unavailable-source";
     route.output_device_id = "other-headphones";
@@ -1529,7 +1793,7 @@ void test_effective_audio_mode_survives_a_stale_scene_update() {
     // Full scene persistence is asynchronous in the desktop. A delayed scene
     // from an older UI may still contain the requested Pro value even though
     // the currently open backend is shared. Status must describe hardware.
-    SceneConfigV1 stale = engine->scene();
+    SceneConfigV2 stale = engine->scene();
     stale.audio.mode = AudioMode::exclusive_pro;
     stale.audio.buffer_frames = 128;
     CHECK(engine->set_scene(stale, error));
@@ -1547,7 +1811,7 @@ void test_failed_exclusive_and_shared_start_does_not_falsify_effective_scene() {
     auto backend = std::make_unique<RouteRecordingBackend>();
     RouteRecordingBackend* recorder = backend.get();
     auto engine = std::make_unique<SpatialAudioEngine>(std::move(backend));
-    SceneConfigV1 requested = engine->scene();
+    SceneConfigV2 requested = engine->scene();
     requested.audio.mode = AudioMode::exclusive_pro;
     requested.audio.buffer_frames = 128;
     std::string error;
@@ -1572,8 +1836,8 @@ void test_engine_mock_pipeline() {
     auto mock = std::make_unique<MockAudioBackend>();
     MockAudioBackend* mock_pointer = mock.get();
     auto engine = std::make_unique<SpatialAudioEngine>(std::move(mock));
-    SceneConfigV1 scene{};
-    SceneConfigV1 unavailable = scene;
+    SceneConfigV2 scene{};
+    SceneConfigV2 unavailable = scene;
     unavailable.hrtf.profile_id = "sadie-d2-kemar";
     std::string error;
     CHECK(!engine->set_scene(unavailable, error));
@@ -1615,12 +1879,56 @@ void test_engine_mock_pipeline() {
     engine->stop_audio();
 }
 
+void test_engine_mock_surround_status_and_programme_input() {
+    auto mock = std::make_unique<MockAudioBackend>();
+    MockAudioBackend* mock_pointer = mock.get();
+    auto engine = std::make_unique<SpatialAudioEngine>(std::move(mock));
+
+    SceneConfigV2 scene{};
+    scene.audio.capture_provider = CaptureProvider::external_render;
+    scene.audio.capture_endpoint_id = "vb-cable-5.1";
+    scene.audio.output_device_id = "usb-headphones";
+    scene.audio.input_layout = InputLayout::surround_5_1;
+    scene.audio.bypass = true;
+    scene.audio.master_gain_db = 0.0F;
+    scene.audio.room_mix = 0.0F;
+    scene.lfe.enabled = false;
+    scene.room.enabled = false;
+
+    std::string error;
+    CHECK(engine->set_scene(scene, error));
+    CHECK(engine->start_audio(error));
+    const EngineStatusV1 status = engine->status();
+    CHECK(status.capture_state == StreamState::running);
+    CHECK(status.render_state == StreamState::running);
+    CHECK(status.input_layout == InputLayout::surround_5_1);
+    CHECK(status.capture_channels == 6U);
+    CHECK(status.capture_channel_mask == kSurround51ChannelMask);
+
+    std::array<ProgrammeFrame, 32> input{};
+    input[0].front_left = 0.01F;
+    input[0].front_right = 0.02F;
+    input[0].front_center = 0.03F;
+    input[0].surround_left = 0.04F;
+    input[0].surround_right = 0.05F;
+    std::array<StereoFrame, 32> output{};
+    mock_pointer->process_block(input.data(), output.data(), output.size());
+    const StereoFrame expected = downmix_programme_to_stereo(input[0], 0.0F);
+    CHECK_NEAR(output[0].left, expected.left, 1.0e-5F);
+    CHECK_NEAR(output[0].right, expected.right, 1.0e-5F);
+    CHECK(output[0].left != output[0].right);
+    CHECK(std::all_of(output.begin() + 1, output.end(), [](const StereoFrame& frame) {
+        return std::abs(frame.left) < 1.0e-7F && std::abs(frame.right) < 1.0e-7F;
+    }));
+    engine->stop_audio();
+}
+
 void test_engine_head_pose_changes_binaural_output() {
     auto mock = std::make_unique<MockAudioBackend>();
     MockAudioBackend* mock_pointer = mock.get();
     auto engine = std::make_unique<SpatialAudioEngine>(std::move(mock));
 
-    SceneConfigV1 scene{};
+    SceneConfigV2 scene{};
     scene.hrtf.profile_id = "builtin-analytic-neutral";
     scene.speakers[0].position_m = {0.0F, 1.2F, 2.0F}; // left input source, world-front
     scene.speakers[1].position_m = {1.0F, 1.2F, 2.0F};
@@ -1684,7 +1992,7 @@ void test_hrtf_cache_when_fixture_is_available() {
     if (!std::filesystem::exists(sofa_path))
         return;
     auto engine = std::make_unique<SpatialAudioEngine>(std::make_unique<MockAudioBackend>());
-    SceneConfigV1 scene{};
+    SceneConfigV2 scene{};
     scene.hrtf.profile_id = "personal-test";
     scene.hrtf.sofa_path = sofa_path.string();
     std::string error;
@@ -1700,6 +2008,7 @@ void test_hrtf_cache_when_fixture_is_available() {
 int main() {
     test_spsc_fifo();
     test_endpoint_contract_selection();
+    test_surround_input_contracts();
     test_wasapi_period_and_capture_budget_policy();
     test_exclusive_render_format_policy_and_pcm_s32_conversion();
     test_pose_wire_contract();
@@ -1714,15 +2023,19 @@ int main() {
     test_hrtf_worker_publishes_direct_before_failed_room();
     test_measured_sofa_itd_when_available();
     test_convolver_and_morph();
+    test_five_source_two_ear_convolver_channel_isolation();
     test_partitioned_convolver_matches_time_domain_reference();
     test_partitioned_convolver_morph_and_interruption();
+    test_lfe_symmetric_low_pass_and_downmix();
     test_eq_and_limiter();
     test_bypass_crossfade_and_idempotent_eq();
     test_potential_binaural_warning_detector();
     test_polyphase_resampler_quality_and_drift();
+    test_programme_resampler_channel_isolation();
     test_resampler_xrun_event_telemetry();
     test_room_acoustics_and_coordinates();
     test_order3_binaural_decoder_and_rotation();
+    test_scene_v1_migration_and_v2_roundtrip();
     test_json_and_ui_commands();
     test_json_frame_decoder();
     test_single_instance_guard();
@@ -1732,6 +2045,7 @@ int main() {
     test_effective_audio_mode_survives_a_stale_scene_update();
     test_failed_exclusive_and_shared_start_does_not_falsify_effective_scene();
     test_engine_mock_pipeline();
+    test_engine_mock_surround_status_and_programme_input();
     test_engine_head_pose_changes_binaural_output();
     test_hrtf_cache_when_fixture_is_available();
     if (failures != 0) {

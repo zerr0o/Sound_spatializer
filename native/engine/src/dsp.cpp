@@ -66,8 +66,9 @@ struct BinauralConvolver::PartitionedState {
     using Spectrum = std::array<std::complex<float>, kFftSize>;
 
     struct FilterSpectra {
-        std::array<std::array<Spectrum, kMaximumTailPartitions>, 4> paths{};
+        std::array<std::array<Spectrum, kMaximumTailPartitions>, kDirectionalSourceCount * 2> paths{};
         std::size_t partition_count{};
+        std::size_t source_count{2};
     };
 
     struct OutputBlock {
@@ -120,6 +121,7 @@ struct BinauralConvolver::PartitionedState {
 
     void build_filter(const HrirFilterBank& bank, FilterSpectra& output) noexcept {
         output = {};
+        output.source_count = bank.source_count;
         if (bank.tap_count <= kDirectTapLimit) return;
         const std::size_t tail_taps = bank.tap_count - kDirectTapLimit;
         output.partition_count = (tail_taps + kPartitionFrames - 1) / kPartitionFrames;
@@ -153,6 +155,7 @@ struct BinauralConvolver::PartitionedState {
             }
         }
         current_filter.partition_count = partitions;
+        current_filter.source_count = std::max(current_filter.source_count, target_filter.source_count);
     }
 
     void reset_stream() noexcept {
@@ -174,14 +177,14 @@ struct BinauralConvolver::PartitionedState {
         return {block.ears[0][offset], block.ears[1][offset]};
     }
 
-    void ingest(StereoFrame input, bool morphing) noexcept {
+    void ingest(const DirectionalFrame& input, bool morphing) noexcept {
         const std::size_t offset = static_cast<std::size_t>(sample_position % kPartitionFrames);
-        input_blocks[0][offset] = input.left;
-        input_blocks[1][offset] = input.right;
+        for (std::size_t source = 0; source < kDirectionalSourceCount; ++source)
+            input_blocks[source][offset] = input.sources[source];
         if (offset + 1 == kPartitionFrames) {
             const std::uint64_t sequence = next_input_block++;
             const std::size_t spectrum_slot = static_cast<std::size_t>(sequence % kMaximumTailPartitions);
-            for (std::size_t source = 0; source < 2; ++source) {
+            for (std::size_t source = 0; source < kDirectionalSourceCount; ++source) {
                 Spectrum spectrum{};
                 for (std::size_t sample = 0; sample < kPartitionFrames; ++sample) {
                     spectrum[sample] = previous_input_blocks[source][sample];
@@ -214,14 +217,14 @@ struct BinauralConvolver::PartitionedState {
     FilterSpectra target_filter{};
     HrirFilterBank current_bank{};
     HrirFilterBank target_bank{};
-    std::array<std::array<float, kTimeDomainHrirTaps * 2>, 2> direct_history{};
+    std::array<std::array<float, kTimeDomainHrirTaps * 2>, kDirectionalSourceCount> direct_history{};
     std::size_t direct_history_index{};
     std::uint32_t morph_total{};
     std::uint32_t morph_remaining{};
-    std::array<std::array<Spectrum, kMaximumTailPartitions>, 2> input_spectra{};
+    std::array<std::array<Spectrum, kMaximumTailPartitions>, kDirectionalSourceCount> input_spectra{};
     std::array<std::uint64_t, kMaximumTailPartitions> input_sequences{};
-    std::array<std::array<float, kPartitionFrames>, 2> input_blocks{};
-    std::array<std::array<float, kPartitionFrames>, 2> previous_input_blocks{};
+    std::array<std::array<float, kPartitionFrames>, kDirectionalSourceCount> input_blocks{};
+    std::array<std::array<float, kPartitionFrames>, kDirectionalSourceCount> previous_input_blocks{};
     OutputCache current_output{};
     OutputCache target_output{};
     Spectrum scratch{};
@@ -244,7 +247,7 @@ private:
         block.ears = {};
         for (std::size_t ear = 0; ear < 2; ++ear) {
             scratch.fill({});
-            for (std::size_t source = 0; source < 2; ++source) {
+            for (std::size_t source = 0; source < filter.source_count; ++source) {
                 const std::size_t path = source * 2 + ear;
                 for (std::size_t partition = 0; partition < filter.partition_count; ++partition) {
                     if (partition > input_sequence) break;
@@ -304,6 +307,8 @@ void BinauralConvolver::freeze_current_morph() noexcept {
         }
     }
     partitioned_->current_bank.tap_count = count;
+    partitioned_->current_bank.source_count =
+        std::max(partitioned_->current_bank.source_count, partitioned_->target_bank.source_count);
     partitioned_->blend_current_filter(alpha);
     partitioned_->rebuild_pending(partitioned_->current_filter, partitioned_->current_output);
     partitioned_->target_output = partitioned_->current_output;
@@ -312,7 +317,8 @@ void BinauralConvolver::freeze_current_morph() noexcept {
 }
 
 bool BinauralConvolver::set_filters(const HrirFilterBank& filters, std::uint32_t morph_frames) noexcept {
-    if (filters.tap_count == 0 || filters.tap_count > kMaximumHrirTaps) {
+    if (filters.tap_count == 0 || filters.tap_count > kMaximumHrirTaps ||
+        filters.source_count == 0 || filters.source_count > kDirectionalSourceCount) {
         return false;
     }
     freeze_current_morph();
@@ -362,29 +368,28 @@ float BinauralConvolver::convolve(const float* history, const float* coefficient
     return sum;
 }
 
-void BinauralConvolver::process(const StereoFrame* input, StereoFrame* output, std::size_t frame_count) noexcept {
+void BinauralConvolver::process(const DirectionalFrame* input, StereoFrame* output, std::size_t frame_count) noexcept {
     if (input == nullptr || output == nullptr) {
         return;
     }
     for (std::size_t frame = 0; frame < frame_count; ++frame) {
-        const StereoFrame input_frame = input[frame];
+        const DirectionalFrame input_frame = input[frame];
         partitioned_->direct_history_index =
             (partitioned_->direct_history_index + kTimeDomainHrirTaps - 1) % kTimeDomainHrirTaps;
-        partitioned_->direct_history[0][partitioned_->direct_history_index] = input_frame.left;
-        partitioned_->direct_history[0][partitioned_->direct_history_index + kTimeDomainHrirTaps] = input_frame.left;
-        partitioned_->direct_history[1][partitioned_->direct_history_index] = input_frame.right;
-        partitioned_->direct_history[1][partitioned_->direct_history_index + kTimeDomainHrirTaps] = input_frame.right;
-
-        const float* left_history = partitioned_->direct_history[0].data() + partitioned_->direct_history_index;
-        const float* right_history = partitioned_->direct_history[1].data() + partitioned_->direct_history_index;
+        for (std::size_t source = 0; source < kDirectionalSourceCount; ++source) {
+            auto& history = partitioned_->direct_history[source];
+            history[partitioned_->direct_history_index] = input_frame.sources[source];
+            history[partitioned_->direct_history_index + kTimeDomainHrirTaps] = input_frame.sources[source];
+        }
         const std::size_t current_direct_taps =
             std::min(partitioned_->current_bank.tap_count, kTimeDomainHrirTaps);
-        const float current_left =
-            convolve(left_history, partitioned_->current_bank.path(0, 0).data(), current_direct_taps) +
-            convolve(right_history, partitioned_->current_bank.path(1, 0).data(), current_direct_taps);
-        const float current_right =
-            convolve(left_history, partitioned_->current_bank.path(0, 1).data(), current_direct_taps) +
-            convolve(right_history, partitioned_->current_bank.path(1, 1).data(), current_direct_taps);
+        float current_left = 0.0F;
+        float current_right = 0.0F;
+        for (std::size_t source = 0; source < partitioned_->current_bank.source_count; ++source) {
+            const float* history = partitioned_->direct_history[source].data() + partitioned_->direct_history_index;
+            current_left += convolve(history, partitioned_->current_bank.path(source, 0).data(), current_direct_taps);
+            current_right += convolve(history, partitioned_->current_bank.path(source, 1).data(), current_direct_taps);
+        }
         const std::uint64_t output_block = partitioned_->sample_position / kPartitionFrames;
         const std::size_t output_offset = static_cast<std::size_t>(partitioned_->sample_position % kPartitionFrames);
         const StereoFrame current_tail =
@@ -393,12 +398,13 @@ void BinauralConvolver::process(const StereoFrame* input, StereoFrame* output, s
         if (partitioned_->morph_remaining != 0) {
             const std::size_t target_direct_taps =
                 std::min(partitioned_->target_bank.tap_count, kTimeDomainHrirTaps);
-            const float target_left =
-                convolve(left_history, partitioned_->target_bank.path(0, 0).data(), target_direct_taps) +
-                convolve(right_history, partitioned_->target_bank.path(1, 0).data(), target_direct_taps);
-            const float target_right =
-                convolve(left_history, partitioned_->target_bank.path(0, 1).data(), target_direct_taps) +
-                convolve(right_history, partitioned_->target_bank.path(1, 1).data(), target_direct_taps);
+            float target_left = 0.0F;
+            float target_right = 0.0F;
+            for (std::size_t source = 0; source < partitioned_->target_bank.source_count; ++source) {
+                const float* history = partitioned_->direct_history[source].data() + partitioned_->direct_history_index;
+                target_left += convolve(history, partitioned_->target_bank.path(source, 0).data(), target_direct_taps);
+                target_right += convolve(history, partitioned_->target_bank.path(source, 1).data(), target_direct_taps);
+            }
             const StereoFrame target_tail =
                 partitioned_->output_sample(partitioned_->target_output, output_block, output_offset);
             const float alpha = 1.0F - static_cast<float>(partitioned_->morph_remaining) /
@@ -419,6 +425,22 @@ void BinauralConvolver::process(const StereoFrame* input, StereoFrame* output, s
             output[frame] = {current_left + current_tail.left, current_right + current_tail.right};
         }
         partitioned_->ingest(input_frame, partitioned_->morph_remaining != 0);
+    }
+}
+
+void BinauralConvolver::process(const StereoFrame* input, StereoFrame* output, std::size_t frame_count) noexcept {
+    if (input == nullptr || output == nullptr) return;
+    constexpr std::size_t adapter_frames = 256;
+    std::array<DirectionalFrame, adapter_frames> directional{};
+    std::size_t offset = 0;
+    while (offset < frame_count) {
+        const std::size_t count = std::min(adapter_frames, frame_count - offset);
+        for (std::size_t frame = 0; frame < count; ++frame) {
+            directional[frame].sources[0] = input[offset + frame].left;
+            directional[frame].sources[1] = input[offset + frame].right;
+        }
+        process(directional.data(), output + offset, count);
+        offset += count;
     }
 }
 
@@ -488,6 +510,70 @@ BiquadCoefficients design_biquad(const BiquadParameters& parameters, float sampl
         break;
     }
     return {b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0};
+}
+
+void LfeRenderer::prepare(float sample_rate) noexcept {
+    coefficients_ = design_biquad({BiquadType::low_pass, 120.0F, 0.70710678F, 0.0F}, sample_rate);
+    reset();
+}
+
+void LfeRenderer::reset() noexcept { states_ = {}; }
+
+void LfeRenderer::configure(bool enabled, float gain_db, std::uint32_t transition_frames) noexcept {
+    configured_gain_db_ = gain_db;
+    target_enabled_ = enabled;
+    target_gain_ = enabled ? db_to_linear(gain_db) : 0.0F;
+    if (transition_frames == 0) {
+        gain_ = target_gain_;
+        gain_step_ = 0.0F;
+        gain_frames_remaining_ = 0;
+        enabled_ = enabled;
+        if (!enabled_) reset();
+        return;
+    }
+    enabled_ = true;
+    gain_step_ = (target_gain_ - gain_) / static_cast<float>(transition_frames);
+    gain_frames_remaining_ = transition_frames;
+}
+
+void LfeRenderer::set_enabled(bool enabled) noexcept { configure(enabled, configured_gain_db_, 0); }
+
+void LfeRenderer::set_gain_db(float gain_db) noexcept { configure(target_enabled_, gain_db, 0); }
+
+float LfeRenderer::process_sample(float input) noexcept {
+    if (!enabled_) return 0.0F;
+    if (gain_frames_remaining_ != 0) {
+        gain_ += gain_step_;
+        --gain_frames_remaining_;
+        if (gain_frames_remaining_ == 0) {
+            gain_ = target_gain_;
+            gain_step_ = 0.0F;
+            enabled_ = target_enabled_;
+            if (!enabled_) {
+                reset();
+                return 0.0F;
+            }
+        }
+    }
+    float value = std::isfinite(input) ? input * gain_ : 0.0F;
+    for (auto& state : states_) {
+        const float output = coefficients_.b0 * value + state.z1;
+        state.z1 = coefficients_.b1 * value - coefficients_.a1 * output + state.z2;
+        state.z2 = coefficients_.b2 * value - coefficients_.a2 * output;
+        value = output;
+    }
+    return value;
+}
+
+StereoFrame downmix_programme_to_stereo(const ProgrammeFrame& input, float rendered_lfe) noexcept {
+    // Conventional -3 dB contribution for a phantom centre, each associated
+    // surround, and the already-filtered mono LFE bed. The true-peak limiter
+    // remains responsible for coherent multichannel summation headroom.
+    constexpr float minus_three_db = 0.70710678F;
+    return {
+        input.front_left + minus_three_db * (input.front_center + input.surround_left + rendered_lfe),
+        input.front_right + minus_three_db * (input.front_center + input.surround_right + rendered_lfe),
+    };
 }
 
 bool StereoParametricEq::configure(std::span<const BiquadParameters> sections, float sample_rate) noexcept {
@@ -901,6 +987,105 @@ void AsyncStereoResampler::reset() noexcept {
 }
 
 void AsyncStereoResampler::set_nominal_ratio(float input_rate_over_output_rate) noexcept {
+    nominal_ratio_ = std::clamp(input_rate_over_output_rate, 0.5F, 2.0F);
+}
+
+AsyncProgrammeResampler::AsyncProgrammeResampler(std::size_t fifo_capacity_frames) : fifo_(fifo_capacity_frames) {
+    target_fill_frames_ = std::min<std::size_t>(fifo_capacity_frames / 4, 512);
+    build_kernel_table();
+}
+
+void AsyncProgrammeResampler::build_kernel_table() noexcept {
+    constexpr float radius = static_cast<float>(kKernelTaps) * 0.5F;
+    constexpr int centre_index = static_cast<int>(kKernelTaps / 2) - 1;
+    for (std::size_t phase_index = 0; phase_index < kKernelPhases; ++phase_index) {
+        const float fraction = static_cast<float>(phase_index) / static_cast<float>(kKernelPhases);
+        float sum = 0.0F;
+        for (std::size_t tap = 0; tap < kKernelTaps; ++tap) {
+            const float offset = static_cast<float>(static_cast<int>(tap) - centre_index);
+            const float distance = fraction - offset;
+            const float sinc = std::abs(distance) < 1.0e-7F
+                                   ? 1.0F
+                                   : std::sin(kPi * distance) / (kPi * distance);
+            const float normalized_distance = std::clamp(distance / radius, -1.0F, 1.0F);
+            const float window = 0.42F + 0.5F * std::cos(kPi * normalized_distance) +
+                                 0.08F * std::cos(2.0F * kPi * normalized_distance);
+            kernel_table_[phase_index][tap] = sinc * window;
+            sum += kernel_table_[phase_index][tap];
+        }
+        if (std::abs(sum) > 1.0e-8F) {
+            for (float& coefficient : kernel_table_[phase_index]) coefficient /= sum;
+        }
+    }
+}
+
+bool AsyncProgrammeResampler::prime() noexcept {
+    constexpr std::size_t centre_index = kKernelTaps / 2 - 1;
+    constexpr std::size_t required_future_samples = kKernelTaps - centre_index;
+    if (fifo_.size() < required_future_samples) return false;
+    source_window_.fill({});
+    for (std::size_t tap = centre_index; tap < kKernelTaps; ++tap) {
+        if (!fifo_.try_pop(source_window_[tap])) return false;
+    }
+    primed_ = true;
+    return true;
+}
+
+std::size_t AsyncProgrammeResampler::push(const ProgrammeFrame* frames, std::size_t frame_count) noexcept {
+    if (frames == nullptr) return 0;
+    const std::size_t pushed = fifo_.push(frames, frame_count);
+    if (pushed != frame_count) overruns_.fetch_add(1, std::memory_order_relaxed);
+    return pushed;
+}
+
+std::size_t AsyncProgrammeResampler::render(ProgrammeFrame* output, std::size_t frame_count,
+                                             float output_sample_rate) noexcept {
+    if (output == nullptr || frame_count == 0) return 0;
+    if (!primed_ && !prime()) {
+        std::fill_n(output, frame_count, ProgrammeFrame{});
+        return 0;
+    }
+    const float elapsed = static_cast<float>(frame_count) / std::max(1.0F, output_sample_rate);
+    const float ratio = nominal_ratio_ * drift_controller_.update(fifo_.size(), target_fill_frames_, elapsed);
+    current_ratio_.store(ratio, std::memory_order_relaxed);
+
+    bool block_underfed = false;
+    for (std::size_t produced = 0; produced < frame_count; ++produced) {
+        const std::size_t phase_index = std::min<std::size_t>(
+            static_cast<std::size_t>(phase_ * static_cast<double>(kKernelPhases)), kKernelPhases - 1);
+        const auto& kernel = kernel_table_[phase_index];
+        ProgrammeFrame filtered{};
+        for (std::size_t tap = 0; tap < kKernelTaps; ++tap) {
+            for (std::size_t channel = 0; channel < kProgrammeChannelCount; ++channel)
+                filtered[channel] += source_window_[tap][channel] * kernel[tap];
+        }
+        output[produced] = filtered;
+        phase_ += ratio;
+        while (phase_ >= 1.0) {
+            std::move(source_window_.begin() + 1, source_window_.end(), source_window_.begin());
+            if (!fifo_.try_pop(source_window_.back())) {
+                source_window_.back() = {};
+                block_underfed = true;
+            }
+            phase_ -= 1.0;
+        }
+    }
+    if (block_underfed) underruns_.fetch_add(1, std::memory_order_relaxed);
+    return frame_count;
+}
+
+void AsyncProgrammeResampler::reset() noexcept {
+    fifo_.reset();
+    drift_controller_.reset();
+    source_window_.fill({});
+    phase_ = 0.0;
+    primed_ = false;
+    underruns_.store(0, std::memory_order_relaxed);
+    overruns_.store(0, std::memory_order_relaxed);
+    current_ratio_.store(nominal_ratio_, std::memory_order_relaxed);
+}
+
+void AsyncProgrammeResampler::set_nominal_ratio(float input_rate_over_output_rate) noexcept {
     nominal_ratio_ = std::clamp(input_rate_over_output_rate, 0.5F, 2.0F);
 }
 

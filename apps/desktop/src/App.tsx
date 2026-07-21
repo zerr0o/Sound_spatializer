@@ -52,7 +52,7 @@ export default function App() {
       }
       if (!active) return;
       const effectiveConfig = config ?? {
-        schemaVersion: 1 as const,
+        schemaVersion: 2 as const,
         scene: structuredClone(defaultScene),
         preferences: useAppStore.getState().preferences,
       };
@@ -163,7 +163,7 @@ export default function App() {
       void recoverRoute();
     }
     previousRouteReady.current = capabilities.audioRouteReady;
-  }, [audioDevices, initialized, notify, scene.captureEndpointId, scene.captureProvider, scene.physicalOutputDeviceId, setRuntimeCapabilities]);
+  }, [audioDevices, initialized, notify, scene.captureEndpointId, scene.captureProvider, scene.inputLayout, scene.physicalOutputDeviceId, setRuntimeCapabilities]);
 
   useEffect(() => {
     if (!initialized) return;

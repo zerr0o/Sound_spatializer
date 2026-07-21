@@ -5,10 +5,10 @@ qui exigent du matériel, un certificat ou une infrastructure Microsoft.
 
 ## Portes automatisées
 
-- schéma `SceneConfigV1` et exemple par défaut ;
+- schémas `SceneConfigV1`/`SceneConfigV2`, exemples et migration V1→V2 ;
 - sérialisation/désérialisation exacte du paquet pose 64 octets ;
 - signe du yaw et invariance des enceintes dans le monde ;
-- impulsions des quatre chemins HRTF, comparaison du chemin partitionné à une
+- impulsions des dix chemins HRTF en 5.1 (et quatre en stéréo), comparaison du chemin partitionné à une
   référence temporelle, longueur maximale et fondu interrompu sans discontinuité ;
 - préparation HRTF latest-wins sur un thread distinct, application d'une banque
   de salle prête sans nouvelle requête HRTF et conservation de la durée restante
@@ -17,8 +17,10 @@ qui exigent du matériel, un certificat ou une infrastructure Microsoft.
 - dérive synthétique de l'ASRC et bornage FIFO ;
 - sélection de période WASAPI sur multiples fondamentaux et budgets bornés de
   paquets/frames loopback par réveil ;
-- validation des valeurs par défaut de route V1, round-trip des deux fournisseurs
+- validation des valeurs par défaut de route V2, round-trip des deux fournisseurs
   et rejet atomique d'une source absente, inactive ou égale à la sortie ;
+- validation stricte de l'entrée 5.1 (six canaux, masque `0x3F` ou `0x60F`),
+  isolation FL/FR/FC/SL/SR et rendu LFE symétrique filtré à 120 Hz ;
 - RIR des sources-images contre positions analytiques ;
 - rejet des SOFA incompatibles ;
 - type-check, tests et build production de l'interface ;

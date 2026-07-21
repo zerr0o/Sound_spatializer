@@ -1,7 +1,7 @@
 import type {
   AppPreferences,
   EngineStatusV1,
-  SceneConfigV1,
+  SceneConfigV2,
   SurfaceAcoustics,
   TrackingMetrics,
 } from '../types/contracts';
@@ -12,8 +12,9 @@ const material = (
   diffusion: [number, number, number],
 ): SurfaceAcoustics => ({ materialId, absorption, diffusion });
 
-export const defaultScene: SceneConfigV1 = {
-  version: 1,
+export const defaultScene: SceneConfigV2 = {
+  version: 2,
+  inputLayout: 'stereo',
   speakers: [
     {
       id: 'L',
@@ -31,7 +32,32 @@ export const defaultScene: SceneConfigV1 = {
       gainDb: 0,
       muted: false,
     },
+    {
+      id: 'C',
+      channel: 'C',
+      label: 'Enceinte centrale',
+      position: { x: 0, y: 1.2, z: 2 },
+      gainDb: 0,
+      muted: false,
+    },
+    {
+      id: 'LS',
+      channel: 'LS',
+      label: 'Surround gauche',
+      position: { x: -1.879385, y: 1.2, z: -0.68404 },
+      gainDb: 0,
+      muted: false,
+    },
+    {
+      id: 'RS',
+      channel: 'RS',
+      label: 'Surround droite',
+      position: { x: 1.879385, y: 1.2, z: -0.68404 },
+      gainDb: 0,
+      muted: false,
+    },
   ],
+  lfe: { gainDb: 0, muted: false },
   listener: {
     position: { x: 0, y: 1.2, z: 0 },
     neutralPose: { x: 0, y: 0, z: 0, w: 1 },
@@ -82,6 +108,9 @@ export const emptyEngineStatus: EngineStatusV1 = {
   version: 1,
   audioMode: 'shared-low-latency',
   renderSampleFormat: 'unknown',
+  inputLayout: 'stereo',
+  captureChannels: 2,
+  captureChannelMask: 0x3,
   connection: 'offline',
   captureActive: false,
   renderActive: false,
@@ -125,6 +154,8 @@ export const demoAudioDevices = [
     isSoundSpatializerEndpoint: false,
     transport: 'usb' as const,
     sampleRate: 48_000,
+    channelCount: 2,
+    channelMask: 0x3,
   },
   {
     id: 'preview-external-render',
@@ -133,5 +164,7 @@ export const demoAudioDevices = [
     isSoundSpatializerEndpoint: false,
     transport: 'unknown' as const,
     sampleRate: 48_000,
+    channelCount: 6,
+    channelMask: 0x60f,
   },
 ];

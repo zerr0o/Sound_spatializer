@@ -5,9 +5,10 @@ never cross the UI boundary. Control and status messages use length-prefixed JSO
 over a per-user named pipe; head-pose updates use the fixed binary packet described
 in `head-pose-v1.md`.
 
-`scene-config-v1.schema.json` is the persisted and wire-level scene contract. Any
-future incompatible change must introduce a new schema version and an explicit
-migration instead of silently reinterpreting existing values.
+`scene-config-v2.schema.json` is the current persisted and wire-level scene
+contract. `scene-config-v1.schema.json` remains immutable for migration. V2 adds
+the explicit `stereo`/`5.1-surround` input layout, five positional channels in
+canonical order, and a separate non-positional LFE channel.
 
 `audio.captureProvider` and `audio.captureEndpointId` are optional V1 additions.
 Their absence is exactly equivalent to `native-driver` and `null`, so an older
@@ -16,6 +17,13 @@ explicitly selected WASAPI render endpoint ID; `native-driver` never carries an
 external ID. Source provider, source endpoint and physical output are changed
 atomically by `set-audio-route`, and an invalid or looped tuple must not be
 partially applied or persisted.
+
+V2 wire speakers use `front-left`, `front-right`, `front-center`,
+`surround-left`, `surround-right` and an explicit `enabled` flag. The LFE object
+also uses `enabled`; UI models may expose a mute switch but must serialize it as
+`enabled: !muted`. A 5.1 scene requires `external-render` with a non-empty
+capture endpoint. Runtime activation additionally requires exactly six capture
+channels and a Windows channel mask of `0x3F` or `0x60F`; no upmix is inferred.
 
 Capture routing is independent from `audio.mode`. In particular,
 `mode: compatibility` means only the 256-frame buffer target; it does not enable

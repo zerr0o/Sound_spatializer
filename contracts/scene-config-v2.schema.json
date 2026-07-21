@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sound-spatializer.local/schema/scene-config-v2.json",
+  "title": "SceneConfigV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "audio", "tracking", "listener", "speakers", "lfe", "hrtf", "headphoneEq", "room"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["captureProvider", "captureEndpointId", "outputDeviceId", "mode", "inputLayout", "sampleRate", "bufferFrames", "bypass", "masterGainDb", "roomMix"],
+      "properties": {
+        "captureProvider": { "enum": ["native-driver", "external-render"] },
+        "captureEndpointId": { "type": ["string", "null"] },
+        "outputDeviceId": { "type": ["string", "null"] },
+        "mode": { "enum": ["shared-low-latency", "exclusive-pro", "compatibility"] },
+        "inputLayout": { "enum": ["stereo", "5.1-surround"] },
+        "sampleRate": { "const": 48000 },
+        "bufferFrames": { "enum": [64, 128, 256] },
+        "bypass": { "type": "boolean" },
+        "masterGainDb": { "type": "number", "minimum": -60, "maximum": 6 },
+        "roomMix": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "captureProvider": { "const": "external-render" } } },
+          "then": {
+            "properties": {
+              "captureEndpointId": { "type": "string", "minLength": 1, "pattern": "\\S" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "captureProvider": { "const": "native-driver" } } },
+          "then": { "properties": { "captureEndpointId": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "inputLayout": { "const": "5.1-surround" } } },
+          "then": {
+            "properties": {
+              "captureProvider": { "const": "external-render" },
+              "captureEndpointId": { "type": "string", "minLength": 1, "pattern": "\\S" }
+            }
+          }
+        }
+      ]
+    },
+    "tracking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "cameraDeviceId", "minimumFps", "predictionLimitMs"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "cameraDeviceId": { "type": ["string", "null"] },
+        "minimumFps": { "type": "integer", "minimum": 30, "maximum": 240 },
+        "predictionLimitMs": { "type": "number", "minimum": 0, "maximum": 20 }
+      }
+    },
+    "listener": { "$ref": "#/$defs/listener" },
+    "speakers": {
+      "description": "Five positional channels in canonical order; the PCM LFE channel is configured separately.",
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "prefixItems": [
+        { "$ref": "#/$defs/frontLeft" },
+        { "$ref": "#/$defs/frontRight" },
+        { "$ref": "#/$defs/frontCenter" },
+        { "$ref": "#/$defs/surroundLeft" },
+        { "$ref": "#/$defs/surroundRight" }
+      ]
+    },
+    "lfe": {
+      "description": "Non-positional low-frequency-effects channel.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "gainDb"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "gainDb": { "type": "number", "minimum": -60, "maximum": 12 }
+      }
+    },
+    "hrtf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profileId", "sofaPath"],
+      "properties": {
+        "profileId": { "type": "string", "minLength": 1 },
+        "sofaPath": { "type": ["string", "null"] }
+      }
+    },
+    "headphoneEq": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "preampDb", "filters"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "preampDb": { "type": "number", "minimum": -24, "maximum": 0 },
+        "filters": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/biquad" } }
+      }
+    },
+    "room": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "dimensionsM", "surfaces", "earlyReflectionOrder", "earlyReflectionLimitMs", "lateReverbEnabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "dimensionsM": { "$ref": "#/$defs/vec3Positive" },
+        "surfaces": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": { "$ref": "#/$defs/surface" }
+        },
+        "earlyReflectionOrder": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "earlyReflectionLimitMs": { "type": "number", "minimum": 0, "maximum": 80 },
+        "lateReverbEnabled": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "vec3": {
+      "type": "array",
+      "prefixItems": [{ "type": "number" }, { "type": "number" }, { "type": "number" }],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "vec3Positive": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number", "exclusiveMinimum": 0 },
+        { "type": "number", "exclusiveMinimum": 0 },
+        { "type": "number", "exclusiveMinimum": 0 }
+      ],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "quaternion": {
+      "type": "array",
+      "prefixItems": [{ "type": "number" }, { "type": "number" }, { "type": "number" }, { "type": "number" }],
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "listener": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["positionM", "neutralOrientation"],
+      "properties": {
+        "positionM": { "$ref": "#/$defs/vec3" },
+        "neutralOrientation": { "$ref": "#/$defs/quaternion" }
+      }
+    },
+    "speakerBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "positionM", "gainDb", "enabled"],
+      "properties": {
+        "channel": { "enum": ["front-left", "front-right", "front-center", "surround-left", "surround-right"] },
+        "positionM": { "$ref": "#/$defs/vec3" },
+        "gainDb": { "type": "number", "minimum": -60, "maximum": 12 },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "frontLeft": { "allOf": [{ "$ref": "#/$defs/speakerBase" }, { "type": "object", "properties": { "channel": { "const": "front-left" } } }] },
+    "frontRight": { "allOf": [{ "$ref": "#/$defs/speakerBase" }, { "type": "object", "properties": { "channel": { "const": "front-right" } } }] },
+    "frontCenter": { "allOf": [{ "$ref": "#/$defs/speakerBase" }, { "type": "object", "properties": { "channel": { "const": "front-center" } } }] },
+    "surroundLeft": { "allOf": [{ "$ref": "#/$defs/speakerBase" }, { "type": "object", "properties": { "channel": { "const": "surround-left" } } }] },
+    "surroundRight": { "allOf": [{ "$ref": "#/$defs/speakerBase" }, { "type": "object", "properties": { "channel": { "const": "surround-right" } } }] },
+    "biquad": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "frequencyHz", "q", "gainDb"],
+      "properties": {
+        "type": { "enum": ["peaking", "low-shelf", "high-shelf", "low-pass", "high-pass"] },
+        "frequencyHz": { "type": "number", "minimum": 10, "maximum": 24000 },
+        "q": { "type": "number", "exclusiveMinimum": 0, "maximum": 30 },
+        "gainDb": { "type": "number", "minimum": -24, "maximum": 24 }
+      }
+    },
+    "surface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["materialId", "absorption", "diffusion"],
+      "properties": {
+        "materialId": { "type": "string", "minLength": 1 },
+        "absorption": { "$ref": "#/$defs/bands" },
+        "diffusion": { "$ref": "#/$defs/bands" }
+      }
+    },
+    "bands": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number", "minimum": 0, "maximum": 1 },
+        { "type": "number", "minimum": 0, "maximum": 1 },
+        { "type": "number", "minimum": 0, "maximum": 1 }
+      ],
+      "minItems": 3,
+      "maxItems": 3
+    }
+  }
+}

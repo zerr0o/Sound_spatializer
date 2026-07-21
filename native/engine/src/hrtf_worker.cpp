@@ -23,6 +23,7 @@ public:
         generation_.store(request.generation, std::memory_order_relaxed);
         scene_revision_.store(request.scene_revision, std::memory_order_relaxed);
         database_.store(reinterpret_cast<std::uintptr_t>(request.database), std::memory_order_relaxed);
+        source_count_.store(static_cast<std::uint32_t>(request.source_count), std::memory_order_relaxed);
         for (std::size_t source = 0; source < request.head_relative_directions.size(); ++source) {
             const Vec3f direction = request.head_relative_directions[source];
             directions_[source * 3].store(bits(direction.x), std::memory_order_relaxed);
@@ -52,6 +53,7 @@ public:
                 return false;
             request.scene_revision = scene_revision_.load(std::memory_order_relaxed);
             request.database = reinterpret_cast<const IHrtfDatabase*>(database_.load(std::memory_order_relaxed));
+            request.source_count = source_count_.load(std::memory_order_relaxed);
             for (std::size_t source = 0; source < request.head_relative_directions.size(); ++source) {
                 request.head_relative_directions[source] = {
                     value(directions_[source * 3].load(std::memory_order_relaxed)),
@@ -95,8 +97,9 @@ private:
     std::atomic<std::uint64_t> published_generation_{};
     std::atomic<std::uint64_t> scene_revision_{};
     std::atomic<std::uintptr_t> database_{};
-    std::array<std::atomic<std::uint32_t>, 6> directions_{};
-    std::array<std::atomic<std::uint32_t>, 2> gains_{};
+    std::array<std::atomic<std::uint32_t>, kDirectionalSourceCount * 3> directions_{};
+    std::array<std::atomic<std::uint32_t>, kDirectionalSourceCount> gains_{};
+    std::atomic<std::uint32_t> source_count_{2};
     std::array<std::atomic<std::uint32_t>, 4> world_to_head_{};
     std::atomic<std::uint32_t> room_enabled_{};
 };
@@ -173,12 +176,12 @@ struct HrtfPreparationWorker::Impl {
             return false;
 
         PreparedDirectHrtfUpdate& update = (*direct_slots)[slot];
-        update = {};
         update.generation = request.generation;
         update.scene_revision = request.scene_revision;
+        update.valid = false;
         if (request.database != nullptr) {
             update.valid = build_binaural_filter_bank(*request.database, request.head_relative_directions,
-                                                      request.speaker_gains, update.filters);
+                                                      request.speaker_gains, request.source_count, update.filters);
         }
         if (!direct_ready_slots.try_push(slot)) {
             release_direct_slot(slot);

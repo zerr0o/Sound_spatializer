@@ -18,6 +18,45 @@ struct StereoFrame {
     float right{};
 };
 
+// Canonical engine-side programme frame. Its memory order intentionally matches
+// KSAUDIO_SPEAKER_5POINT1_SURROUND: FL, FR, FC, LFE, SL, SR. Stereo capture
+// populates only indices 0 and 1 and leaves the remaining channels silent.
+struct ProgrammeFrame {
+    float front_left{};
+    float front_right{};
+    float front_center{};
+    float lfe{};
+    float surround_left{};
+    float surround_right{};
+
+    [[nodiscard]] float& operator[](std::size_t channel) noexcept {
+        switch (channel) {
+        case 0: return front_left;
+        case 1: return front_right;
+        case 2: return front_center;
+        case 3: return lfe;
+        case 4: return surround_left;
+        default: return surround_right;
+        }
+    }
+    [[nodiscard]] const float& operator[](std::size_t channel) const noexcept {
+        switch (channel) {
+        case 0: return front_left;
+        case 1: return front_right;
+        case 2: return front_center;
+        case 3: return lfe;
+        case 4: return surround_left;
+        default: return surround_right;
+        }
+    }
+};
+
+static_assert(sizeof(ProgrammeFrame) == kProgrammeChannelCount * sizeof(float));
+
+struct DirectionalFrame {
+    std::array<float, kDirectionalSourceCount> sources{}; // FL, FR, FC, SL, SR
+};
+
 class BypassCrossfade {
 public:
     void reset(bool bypassed) noexcept;
@@ -35,17 +74,20 @@ private:
 };
 
 struct HrirFilterBank {
+    using Path = std::array<float, kMaximumHrirTaps>;
     std::size_t tap_count{1};
-    // Index = source * 2 + ear: LL, LR, RL, RR.
-    alignas(32) std::array<std::array<float, kMaximumHrirTaps>, 4> coefficients{};
+    std::size_t source_count{2};
+    // Index = source * 2 + ear. Five directional sources feed two ears.
+    // The matrix lives on the heap so control/test stacks do not grow by 160 KiB
+    // for every bank. All production banks are constructed before audio starts;
+    // assignment into an equally-sized bank reuses its allocation.
+    std::vector<Path> coefficients = std::vector<Path>(kDirectionalSourceCount * 2);
 
-    [[nodiscard]] const std::array<float, kMaximumHrirTaps>& path(std::size_t source,
-                                                                  std::size_t ear) const noexcept {
+    [[nodiscard]] const Path& path(std::size_t source, std::size_t ear) const noexcept {
         return coefficients[source * 2 + ear];
     }
 
-    [[nodiscard]] std::array<float, kMaximumHrirTaps>& path(std::size_t source,
-                                                            std::size_t ear) noexcept {
+    [[nodiscard]] Path& path(std::size_t source, std::size_t ear) noexcept {
         return coefficients[source * 2 + ear];
     }
 };
@@ -63,6 +105,8 @@ public:
 
     void reset() noexcept;
     [[nodiscard]] bool set_filters(const HrirFilterBank& filters, std::uint32_t morph_frames) noexcept;
+    void process(const DirectionalFrame* input, StereoFrame* output, std::size_t frame_count) noexcept;
+    // Compatibility adapter for stereo-only tests and embedders.
     void process(const StereoFrame* input, StereoFrame* output, std::size_t frame_count) noexcept;
     [[nodiscard]] bool morphing() const noexcept;
     [[nodiscard]] std::uint32_t morph_remaining_frames() const noexcept;
@@ -86,7 +130,39 @@ struct BiquadCoefficients {
 };
 
 [[nodiscard]] BiquadCoefficients design_biquad(const BiquadParameters& parameters,
-                                                float sample_rate) noexcept;
+                                                 float sample_rate) noexcept;
+
+// A fixed, head-invariant LFE renderer. Two cascaded Butterworth low-pass
+// sections form a fourth-order Linkwitz-Riley response at 120 Hz. No bass
+// management is performed: only the programme LFE channel enters this path.
+class LfeRenderer {
+public:
+    void prepare(float sample_rate) noexcept;
+    void reset() noexcept;
+    void configure(bool enabled, float gain_db, std::uint32_t transition_frames = 0) noexcept;
+    void set_enabled(bool enabled) noexcept;
+    void set_gain_db(float gain_db) noexcept;
+    [[nodiscard]] float process_sample(float input) noexcept;
+
+private:
+    struct State {
+        float z1{};
+        float z2{};
+    };
+
+    BiquadCoefficients coefficients_{};
+    std::array<State, 2> states_{};
+    float gain_{1.0F};
+    float target_gain_{1.0F};
+    float gain_step_{};
+    float configured_gain_db_{};
+    std::uint32_t gain_frames_remaining_{};
+    bool enabled_{true};
+    bool target_enabled_{true};
+};
+
+[[nodiscard]] StereoFrame downmix_programme_to_stereo(const ProgrammeFrame& input,
+                                                       float rendered_lfe) noexcept;
 
 class StereoParametricEq {
 public:
@@ -227,6 +303,42 @@ private:
     DriftController drift_controller_{};
     std::array<std::array<float, kKernelTaps>, kKernelPhases> kernel_table_{};
     std::array<StereoFrame, kKernelTaps> source_window_{};
+    double phase_{};
+    float nominal_ratio_{1.0F};
+    std::size_t target_fill_frames_{512};
+    bool primed_{};
+    std::atomic<std::uint64_t> underruns_{};
+    std::atomic<std::uint64_t> overruns_{};
+    std::atomic<float> current_ratio_{1.0F};
+};
+
+class AsyncProgrammeResampler {
+public:
+    explicit AsyncProgrammeResampler(std::size_t fifo_capacity_frames = 8'192);
+
+    [[nodiscard]] std::size_t push(const ProgrammeFrame* frames, std::size_t frame_count) noexcept;
+    [[nodiscard]] std::size_t render(ProgrammeFrame* output, std::size_t frame_count,
+                                     float output_sample_rate) noexcept;
+    void reset() noexcept;
+    void set_nominal_ratio(float input_rate_over_output_rate) noexcept;
+    void set_target_fill(std::size_t frames) noexcept { target_fill_frames_ = frames; }
+
+    [[nodiscard]] std::size_t fill_frames() const noexcept { return fifo_.size(); }
+    [[nodiscard]] std::uint64_t underruns() const noexcept { return underruns_.load(std::memory_order_relaxed); }
+    [[nodiscard]] std::uint64_t overruns() const noexcept { return overruns_.load(std::memory_order_relaxed); }
+    [[nodiscard]] float current_ratio() const noexcept { return current_ratio_.load(std::memory_order_relaxed); }
+
+private:
+    static constexpr std::size_t kKernelTaps = 16;
+    static constexpr std::size_t kKernelPhases = 256;
+
+    void build_kernel_table() noexcept;
+    [[nodiscard]] bool prime() noexcept;
+
+    SpscRingBuffer<ProgrammeFrame> fifo_;
+    DriftController drift_controller_{};
+    std::array<std::array<float, kKernelTaps>, kKernelPhases> kernel_table_{};
+    std::array<ProgrammeFrame, kKernelTaps> source_window_{};
     double phase_{};
     float nominal_ratio_{1.0F};
     std::size_t target_fill_frames_{512};

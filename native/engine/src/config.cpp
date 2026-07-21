@@ -362,6 +362,42 @@ void append_bands(std::ostringstream& output, const MaterialBands& value) {
     throw std::runtime_error("unknown audio mode");
 }
 
+[[nodiscard]] std::string_view input_layout_name(InputLayout layout) noexcept {
+    switch (layout) {
+    case InputLayout::stereo: return "stereo";
+    case InputLayout::surround_5_1: return "5.1-surround";
+    }
+    return "stereo";
+}
+
+[[nodiscard]] InputLayout parse_input_layout(std::string_view value) {
+    if (value == "stereo") return InputLayout::stereo;
+    if (value == "5.1-surround") return InputLayout::surround_5_1;
+    throw std::runtime_error("unknown input layout");
+}
+
+[[nodiscard]] std::string_view speaker_channel_name(SpeakerChannel channel) noexcept {
+    switch (channel) {
+    case SpeakerChannel::front_left: return "front-left";
+    case SpeakerChannel::front_right: return "front-right";
+    case SpeakerChannel::front_center: return "front-center";
+    case SpeakerChannel::surround_left: return "surround-left";
+    case SpeakerChannel::surround_right: return "surround-right";
+    }
+    return "front-left";
+}
+
+[[nodiscard]] SpeakerChannel parse_speaker_channel(std::string_view value, bool legacy) {
+    if (legacy && value == "left") return SpeakerChannel::front_left;
+    if (legacy && value == "right") return SpeakerChannel::front_right;
+    if (value == "front-left") return SpeakerChannel::front_left;
+    if (value == "front-right") return SpeakerChannel::front_right;
+    if (value == "front-center") return SpeakerChannel::front_center;
+    if (value == "surround-left") return SpeakerChannel::surround_left;
+    if (value == "surround-right") return SpeakerChannel::surround_right;
+    throw std::runtime_error("unknown speaker channel");
+}
+
 [[nodiscard]] std::string_view capture_provider_name(CaptureProvider provider) noexcept {
     switch (provider) {
     case CaptureProvider::native_driver: return "native-driver";
@@ -430,21 +466,28 @@ void append_bands(std::ostringstream& output, const MaterialBands& value) {
     throw std::runtime_error("unknown engine command type");
 }
 
-[[nodiscard]] SceneConfigV1 parse_scene_value(const JsonValue& root) {
+[[nodiscard]] SceneConfigV2 parse_scene_value(const JsonValue& root) {
     const auto& root_object = object(root, "scene");
     reject_unknown_fields(root_object, {"schemaVersion", "audio", "tracking", "listener", "speakers", "hrtf",
-                                        "headphoneEq", "room"}, "scene");
-    SceneConfigV1 scene{};
-    scene.schema_version = unsigned_integer(field(root_object, "schemaVersion"), "schemaVersion");
+                                        "headphoneEq", "lfe", "room"}, "scene");
+    const std::uint32_t source_schema = unsigned_integer(field(root_object, "schemaVersion"), "schemaVersion");
+    if (source_schema != 1 && source_schema != 2)
+        throw std::runtime_error("unsupported scene schema version");
+    const bool legacy = source_schema == 1;
+    SceneConfigV2 scene{};
+    scene.schema_version = 2;
 
     const auto& audio = object(field(root_object, "audio"), "audio");
     reject_unknown_fields(audio, {"captureProvider", "captureEndpointId", "outputDeviceId", "mode",
-                                  "sampleRate", "bufferFrames", "bypass", "masterGainDb", "roomMix"}, "audio");
+                                  "inputLayout", "sampleRate", "bufferFrames", "bypass", "masterGainDb", "roomMix"}, "audio");
     if (const JsonValue* provider = optional_field(audio, "captureProvider"))
         scene.audio.capture_provider = parse_capture_provider(string(*provider, "audio.captureProvider"));
     if (const JsonValue* endpoint = optional_field(audio, "captureEndpointId"))
         scene.audio.capture_endpoint_id = nullable_string(*endpoint, "audio.captureEndpointId");
     scene.audio.output_device_id = nullable_string(field(audio, "outputDeviceId"), "audio.outputDeviceId");
+    scene.audio.input_layout = legacy
+                                   ? InputLayout::stereo
+                                   : parse_input_layout(string(field(audio, "inputLayout"), "audio.inputLayout"));
     scene.audio.mode = parse_audio_mode(string(field(audio, "mode"), "audio.mode"));
     scene.audio.sample_rate = unsigned_integer(field(audio, "sampleRate"), "audio.sampleRate");
     scene.audio.buffer_frames = unsigned_integer(field(audio, "bufferFrames"), "audio.bufferFrames");
@@ -465,16 +508,27 @@ void append_bands(std::ostringstream& output, const MaterialBands& value) {
     scene.listener.neutral_orientation = quaternion(field(listener, "neutralOrientation"), "listener.neutralOrientation");
 
     const auto& speakers = array(field(root_object, "speakers"), "speakers");
-    if (speakers.size() != 2) throw std::runtime_error("speakers must contain exactly two entries");
+    const std::size_t required_speakers = legacy ? 2U : kDirectionalSourceCount;
+    if (speakers.size() != required_speakers)
+        throw std::runtime_error(legacy ? "schema 1 speakers must contain exactly two entries"
+                                        : "schema 2 speakers must contain exactly five entries");
     for (std::size_t index = 0; index < speakers.size(); ++index) {
         const auto& speaker = object(speakers[index], "speaker");
-        reject_unknown_fields(speaker, {"channel", "positionM", "gainDb"}, "speaker");
+        reject_unknown_fields(speaker, {"channel", "positionM", "gainDb", "enabled"}, "speaker");
         const std::string& channel = string(field(speaker, "channel"), "speaker.channel");
-        scene.speakers[index].channel = channel == "left" ? SpeakerChannel::left
-                                        : channel == "right" ? SpeakerChannel::right
-                                                             : throw std::runtime_error("speaker.channel must be left or right");
+        scene.speakers[index].channel = parse_speaker_channel(channel, legacy);
         scene.speakers[index].position_m = vec3(field(speaker, "positionM"), "speaker.positionM");
         scene.speakers[index].gain_db = static_cast<float>(number(field(speaker, "gainDb"), "speaker.gainDb"));
+        scene.speakers[index].enabled = legacy
+                                            ? scene.speakers[index].gain_db > -60.0F
+                                            : boolean(field(speaker, "enabled"), "speaker.enabled");
+    }
+
+    if (!legacy) {
+        const auto& lfe = object(field(root_object, "lfe"), "lfe");
+        reject_unknown_fields(lfe, {"enabled", "gainDb"}, "lfe");
+        scene.lfe.enabled = boolean(field(lfe, "enabled"), "lfe.enabled");
+        scene.lfe.gain_db = static_cast<float>(number(field(lfe, "gainDb"), "lfe.gainDb"));
     }
 
     const auto& hrtf = object(field(root_object, "hrtf"), "hrtf");
@@ -522,7 +576,7 @@ void append_bands(std::ostringstream& output, const MaterialBands& value) {
 
 } // namespace
 
-bool validate_scene_config(const SceneConfigV1& scene, std::string& error) noexcept {
+bool validate_scene_config(const SceneConfigV2& scene, std::string& error) noexcept {
     const auto fail = [&error](std::string message) {
         error = std::move(message);
         return false;
@@ -530,7 +584,7 @@ bool validate_scene_config(const SceneConfigV1& scene, std::string& error) noexc
     const auto finite_vec3 = [](const Vec3f& value) {
         return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
     };
-    if (scene.schema_version != 1) return fail("unsupported scene schema version");
+    if (scene.schema_version != 2) return fail("unsupported scene schema version");
     if (scene.audio.output_device_id && scene.audio.output_device_id->empty())
         return fail("physical output endpoint id cannot be empty");
     switch (scene.audio.capture_provider) {
@@ -549,6 +603,11 @@ bool validate_scene_config(const SceneConfigV1& scene, std::string& error) noexc
     default: return fail("unsupported capture provider");
     }
     if (scene.audio.sample_rate != kSampleRate) return fail("only 48000 Hz is supported");
+    if (scene.audio.input_layout != InputLayout::stereo && scene.audio.input_layout != InputLayout::surround_5_1)
+        return fail("unsupported input layout");
+    if (scene.audio.input_layout == InputLayout::surround_5_1 &&
+        scene.audio.capture_provider != CaptureProvider::external_render)
+        return fail("5.1 surround input requires an external render capture endpoint");
     if (scene.audio.buffer_frames != 64 && scene.audio.buffer_frames != 128 && scene.audio.buffer_frames != 256)
         return fail("audio buffer must be 64, 128, or 256 frames");
     if (!std::isfinite(scene.audio.master_gain_db) || scene.audio.master_gain_db < -60.0F || scene.audio.master_gain_db > 6.0F)
@@ -559,13 +618,24 @@ bool validate_scene_config(const SceneConfigV1& scene, std::string& error) noexc
     if (!std::isfinite(scene.tracking.prediction_limit_ms) || scene.tracking.prediction_limit_ms < 0.0F ||
         scene.tracking.prediction_limit_ms > 20.0F)
         return fail("prediction limit is outside [0, 20] ms");
-    if (scene.speakers[0].channel != SpeakerChannel::left || scene.speakers[1].channel != SpeakerChannel::right)
-        return fail("speakers must be ordered left then right");
+    constexpr std::array<SpeakerChannel, kDirectionalSourceCount> expected_channels{
+        SpeakerChannel::front_left,
+        SpeakerChannel::front_right,
+        SpeakerChannel::front_center,
+        SpeakerChannel::surround_left,
+        SpeakerChannel::surround_right,
+    };
+    for (std::size_t index = 0; index < expected_channels.size(); ++index) {
+        if (scene.speakers[index].channel != expected_channels[index])
+            return fail("speakers must be ordered front-left, front-right, front-center, surround-left, surround-right");
+    }
     for (const auto& speaker : scene.speakers) {
         if (!finite_vec3(speaker.position_m) || !std::isfinite(speaker.gain_db) ||
             speaker.gain_db < -60.0F || speaker.gain_db > 12.0F)
             return fail("speaker position or gain is invalid");
     }
+    if (!std::isfinite(scene.lfe.gain_db) || scene.lfe.gain_db < -60.0F || scene.lfe.gain_db > 12.0F)
+        return fail("LFE gain is outside [-60, 12] dB");
     if (!finite_vec3(scene.listener.position_m)) return fail("listener position is invalid");
     const Quaternionf q = scene.listener.neutral_orientation;
     const float q_length = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
@@ -596,9 +666,12 @@ bool validate_scene_config(const SceneConfigV1& scene, std::string& error) noexc
         };
         if (!inside_room(scene.listener.position_m))
             return fail("listener must be inside the enabled rectangular room");
-        for (const auto& speaker : scene.speakers)
-            if (!inside_room(speaker.position_m))
-                return fail("both speakers must be inside the enabled rectangular room");
+        const std::size_t source_count = scene.audio.input_layout == InputLayout::surround_5_1
+                                             ? kDirectionalSourceCount
+                                             : 2U;
+        for (std::size_t source = 0; source < source_count; ++source)
+            if (scene.speakers[source].enabled && !inside_room(scene.speakers[source].position_m))
+                return fail("speakers must be inside the enabled rectangular room when enabled");
     }
     for (const auto& surface : scene.room.surfaces) {
         if (surface.material_id.empty() ||
@@ -617,15 +690,16 @@ bool validate_scene_config(const SceneConfigV1& scene, std::string& error) noexc
     return true;
 }
 
-std::string scene_config_to_json(const SceneConfigV1& scene) {
+std::string scene_config_to_json(const SceneConfigV2& scene) {
     std::ostringstream output;
     output << std::setprecision(std::numeric_limits<float>::max_digits10);
-    output << "{\"schemaVersion\":" << scene.schema_version << ",\"audio\":{\"captureProvider\":";
+    output << "{\"schemaVersion\":2,\"audio\":{\"captureProvider\":";
     append_escaped(output, capture_provider_name(scene.audio.capture_provider));
     output << ",\"captureEndpointId\":";
     append_optional_string(output, scene.audio.capture_endpoint_id);
     output << ",\"outputDeviceId\":";
     append_optional_string(output, scene.audio.output_device_id);
+    output << ",\"inputLayout\":"; append_escaped(output, input_layout_name(scene.audio.input_layout));
     output << ",\"mode\":"; append_escaped(output, audio_mode_name(scene.audio.mode));
     output << ",\"sampleRate\":" << scene.audio.sample_rate << ",\"bufferFrames\":" << scene.audio.buffer_frames
            << ",\"bypass\":" << (scene.audio.bypass ? "true" : "false")
@@ -640,11 +714,14 @@ std::string scene_config_to_json(const SceneConfigV1& scene) {
     for (std::size_t index = 0; index < scene.speakers.size(); ++index) {
         if (index != 0) output << ',';
         const auto& speaker = scene.speakers[index];
-        output << "{\"channel\":"; append_escaped(output, speaker.channel == SpeakerChannel::left ? "left" : "right");
+        output << "{\"channel\":"; append_escaped(output, speaker_channel_name(speaker.channel));
         output << ",\"positionM\":"; append_vec3(output, speaker.position_m);
-        output << ",\"gainDb\":" << speaker.gain_db << '}';
+        output << ",\"gainDb\":" << speaker.gain_db
+               << ",\"enabled\":" << (speaker.enabled ? "true" : "false") << '}';
     }
-    output << "],\"hrtf\":{\"profileId\":"; append_escaped(output, scene.hrtf.profile_id);
+    output << "],\"lfe\":{\"enabled\":" << (scene.lfe.enabled ? "true" : "false")
+           << ",\"gainDb\":" << scene.lfe.gain_db << '}';
+    output << ",\"hrtf\":{\"profileId\":"; append_escaped(output, scene.hrtf.profile_id);
     output << ",\"sofaPath\":"; append_optional_string(output, scene.hrtf.sofa_path); output << '}';
     output << ",\"headphoneEq\":{\"enabled\":" << (scene.headphone_eq.enabled ? "true" : "false")
            << ",\"preampDb\":" << scene.headphone_eq.preamp_db << ",\"filters\":[";
@@ -669,9 +746,9 @@ std::string scene_config_to_json(const SceneConfigV1& scene) {
     return output.str();
 }
 
-ParseResult<SceneConfigV1> scene_config_from_json(std::string_view json) noexcept {
+ParseResult<SceneConfigV2> scene_config_from_json(std::string_view json) noexcept {
     try {
-        SceneConfigV1 scene = parse_scene_value(JsonParser(json).parse());
+        SceneConfigV2 scene = parse_scene_value(JsonParser(json).parse());
         std::string validation_error;
         if (!validate_scene_config(scene, validation_error)) return {std::nullopt, std::move(validation_error)};
         return {std::move(scene), {}};
@@ -843,9 +920,12 @@ std::string engine_status_to_json(const EngineStatusV1& status) {
     output << ",\"renderState\":"; append_escaped(output, stream_name(status.render_state));
     output << ",\"trackingState\":"; append_escaped(output, tracking_name(status.tracking_state));
     output << ",\"audioMode\":"; append_escaped(output, audio_mode_name(status.audio_mode));
+    output << ",\"inputLayout\":"; append_escaped(output, input_layout_name(status.input_layout));
     output << ",\"renderSampleFormat\":";
     append_escaped(output, sample_format_name(status.render_sample_format));
-    output << ",\"captureSampleRate\":" << status.capture_sample_rate
+    output << ",\"captureChannels\":" << status.capture_channels
+           << ",\"captureChannelMask\":" << status.capture_channel_mask
+           << ",\"captureSampleRate\":" << status.capture_sample_rate
            << ",\"renderSampleRate\":" << status.render_sample_rate
            << ",\"capturePeriodFrames\":" << status.capture_period_frames
            << ",\"renderPeriodFrames\":" << status.render_period_frames
@@ -879,7 +959,7 @@ std::filesystem::path ConfigStore::default_base_directory() {
     return std::filesystem::temp_directory_path() / "SoundSpatializer";
 }
 
-bool ConfigStore::save_scene(const SceneConfigV1& scene, std::string& error) const noexcept {
+bool ConfigStore::save_scene(const SceneConfigV2& scene, std::string& error) const noexcept {
     try {
         if (!validate_scene_config(scene, error)) return false;
         std::filesystem::create_directories(base_directory_);
@@ -914,9 +994,20 @@ bool ConfigStore::save_scene(const SceneConfigV1& scene, std::string& error) con
     }
 }
 
-ParseResult<SceneConfigV1> ConfigStore::load_scene() const noexcept {
+ParseResult<SceneConfigV2> ConfigStore::load_scene() const noexcept {
     try {
-        std::ifstream stream(scene_path(), std::ios::binary);
+        const std::filesystem::path current = scene_path();
+        std::error_code exists_error;
+        const bool current_exists = std::filesystem::exists(current, exists_error);
+        if (exists_error)
+            return {std::nullopt, "could not inspect scene config: " + exists_error.message()};
+
+        // A legacy file is only a fallback when no V2 file exists. Once a V2 file
+        // exists, read/validation errors must remain visible rather than silently
+        // reviving stale settings. Loading V1 is deliberately read-only; the file
+        // is neither deleted nor overwritten during migration.
+        const std::filesystem::path source = current_exists ? current : legacy_scene_path();
+        std::ifstream stream(source, std::ios::binary);
         if (!stream) return {std::nullopt, "scene config does not exist"};
         std::ostringstream contents;
         contents << stream.rdbuf();

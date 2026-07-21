@@ -25,7 +25,7 @@
     "test:tools": "python -m unittest discover -s tools/tests -v",
     "test:desktop-artifact": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/Test-TauriArtifact.ps1",
     "test:desktop-single-instance": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/Test-TauriSingleInstance.ps1",
-    "test:contracts": "ajv validate --spec=draft2020 -s contracts/scene-config-v1.schema.json -d contracts/examples/default-scene-v1.json",
+    "test:contracts": "ajv validate --spec=draft2020 -s contracts/scene-config-v1.schema.json -d contracts/examples/default-scene-v1.json && ajv validate --spec=draft2020 -s contracts/scene-config-v2.schema.json -d contracts/examples/default-scene-v2.json",
     "check": "pnpm --dir apps/desktop check"
   },
   "devDependencies": {

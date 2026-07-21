@@ -1,18 +1,47 @@
 import { describe, expect, it } from 'vitest';
-import { defaultScene } from '../data/defaults';
+import { defaultPreferences, defaultScene } from '../data/defaults';
 import type { HeadPoseSampleV1 } from '../types/contracts';
-import type { WireEngineStatusV1 } from '../types/wire-contracts';
+import type { WireEngineStatusV1, WireSceneConfigV1 } from '../types/wire-contracts';
 import {
   fromWireEngineStatus,
   fromWireSceneConfig,
+  isWireSceneConfigV2,
   packHeadPoseV1,
   quaternionToWire,
   migratePersistedConfig,
+  toPersistedDesktopConfig,
   toWireEngineCommand,
   toWireSceneConfig,
 } from './contracts';
 
-describe('SceneConfigV1 wire', () => {
+const legacyWireScene = (): WireSceneConfigV1 => {
+  const current = toWireSceneConfig(defaultScene);
+  return {
+    schemaVersion: 1,
+    audio: {
+      captureProvider: current.audio.captureProvider,
+      captureEndpointId: current.audio.captureEndpointId,
+      outputDeviceId: current.audio.outputDeviceId,
+      mode: current.audio.mode,
+      sampleRate: current.audio.sampleRate,
+      bufferFrames: current.audio.bufferFrames,
+      bypass: current.audio.bypass,
+      masterGainDb: current.audio.masterGainDb,
+      roomMix: current.audio.roomMix,
+    },
+    tracking: current.tracking,
+    listener: current.listener,
+    speakers: [
+      { channel: 'left', positionM: current.speakers[0].positionM, gainDb: current.speakers[0].gainDb },
+      { channel: 'right', positionM: current.speakers[1].positionM, gainDb: current.speakers[1].gainDb },
+    ],
+    hrtf: current.hrtf,
+    headphoneEq: current.headphoneEq,
+    room: current.room,
+  };
+};
+
+describe('SceneConfigV2 wire', () => {
   it('respecte le repère +Z avant et l’ordre de quaternion wxyz', () => {
     const scene = structuredClone(defaultScene);
     scene.listener.neutralPose = { x: 0.1, y: 0.2, z: 0.3, w: 0.9 };
@@ -21,6 +50,22 @@ describe('SceneConfigV1 wire', () => {
     expect(wire.speakers[1].positionM).toEqual([1, 1.2, 1.732051]);
     expect(wire.listener.neutralOrientation).toEqual([0.9, 0.1, 0.2, 0.3]);
     expect(quaternionToWire(scene.listener.neutralPose)).toEqual([0.9, 0.1, 0.2, 0.3]);
+  });
+
+  it('sérialise exactement les cinq canaux, les états enabled et le LFE séparé', () => {
+    const scene = structuredClone(defaultScene);
+    scene.inputLayout = '5.1-surround';
+    scene.speakers[3].muted = true;
+    scene.lfe = { gainDb: -4.5, muted: true };
+    const wire = toWireSceneConfig(scene);
+    expect(wire.schemaVersion).toBe(2);
+    expect(wire.audio.inputLayout).toBe('5.1-surround');
+    expect(wire.speakers.map((speaker) => speaker.channel)).toEqual([
+      'front-left', 'front-right', 'front-center', 'surround-left', 'surround-right',
+    ]);
+    expect(wire.speakers.map((speaker) => speaker.enabled)).toEqual([true, true, true, false, true]);
+    expect(wire.lfe).toEqual({ enabled: false, gainDb: -4.5 });
+    expect(isWireSceneConfigV2(wire)).toBe(true);
   });
 
   it('sérialise les surfaces dans l’ordre -X,+X,-Z,+Z,sol,plafond', () => {
@@ -50,11 +95,23 @@ describe('SceneConfigV1 wire', () => {
     expect(restored.captureEndpointId).toBe('external-cable');
   });
 
-  it('migre une scène V1 antérieure vers le pilote natif et écrit les champs canoniques', () => {
-    const legacy = toWireSceneConfig(defaultScene);
+  it('persiste uniquement une enveloppe V2', () => {
+    const persisted = toPersistedDesktopConfig({ schemaVersion: 2, scene: defaultScene, preferences: defaultPreferences });
+    expect(persisted.schemaVersion).toBe(2);
+    expect(persisted.scene.schemaVersion).toBe(2);
+  });
+
+  it('migre une scène V1 vers une scène V2 stéréo avec cinq enceintes bornées', () => {
+    const legacy = legacyWireScene();
     delete legacy.audio.captureProvider;
     delete legacy.audio.captureEndpointId;
     const migrated = migratePersistedConfig({ schemaVersion: 1, scene: legacy, preferences: {} });
+    expect(migrated?.schemaVersion).toBe(2);
+    expect(migrated?.scene.version).toBe(2);
+    expect(migrated?.scene.inputLayout).toBe('stereo');
+    expect(migrated?.scene.speakers.map((speaker) => speaker.channel)).toEqual(['L', 'R', 'C', 'LS', 'RS']);
+    expect(migrated?.scene.speakers).toHaveLength(5);
+    expect(migrated?.scene.lfe).toEqual({ gainDb: 0, muted: false });
     expect(migrated?.scene.captureProvider).toBe('native-driver');
     expect(migrated?.scene.captureEndpointId).toBeNull();
     expect(toWireSceneConfig(migrated!.scene).audio).toMatchObject({
@@ -64,18 +121,16 @@ describe('SceneConfigV1 wire', () => {
   });
 
   it('préserve un choix externe encore incomplet sans réinitialiser la scène', () => {
-    const incomplete = toWireSceneConfig({
-      ...structuredClone(defaultScene),
-      captureProvider: 'external-render',
-      captureEndpointId: null,
-    });
+    const incomplete = legacyWireScene();
+    incomplete.audio.captureProvider = 'external-render';
+    incomplete.audio.captureEndpointId = null;
     const migrated = migratePersistedConfig({ schemaVersion: 1, scene: incomplete, preferences: {} });
     expect(migrated?.scene.captureProvider).toBe('external-render');
     expect(migrated?.scene.captureEndpointId).toBeNull();
   });
 
   it('migre scattering scalaire vers diffusion trois bandes', () => {
-    const legacy = toWireSceneConfig(defaultScene) as unknown as { room: { lateReverbEnabled?: boolean; surfaces: Array<Record<string, unknown>> } };
+    const legacy = legacyWireScene() as unknown as { room: { lateReverbEnabled?: boolean; surfaces: Array<Record<string, unknown>> } };
     delete legacy.room.lateReverbEnabled;
     legacy.room.surfaces = legacy.room.surfaces.map((surface) => {
       const { diffusion: _diffusion, ...rest } = surface;
@@ -204,6 +259,9 @@ describe('EngineStatusV1 wire', () => {
       schemaVersion: 1,
       audioMode: 'exclusive-pro',
       renderSampleFormat: 'pcm-s32',
+      inputLayout: '5.1-surround',
+      captureChannels: 6,
+      captureChannelMask: 0x60f,
       captureState: 'running', renderState: 'degraded', trackingState: 'tracking',
       captureSampleRate: 48_000, renderSampleRate: 48_000,
       capturePeriodFrames: 128, renderPeriodFrames: 256, fifoFillFrames: 512,
@@ -216,6 +274,9 @@ describe('EngineStatusV1 wire', () => {
     expect(status.connection).toBe('degraded');
     expect(status.audioMode).toBe('exclusive-pro');
     expect(status.renderSampleFormat).toBe('pcm-s32');
+    expect(status.inputLayout).toBe('5.1-surround');
+    expect(status.captureChannels).toBe(6);
+    expect(status.captureChannelMask).toBe(0x60f);
     expect(status.capturePeriodMs).toBeCloseTo(2.6667, 3);
     expect(status.renderPeriodMs).toBeCloseTo(5.3333, 3);
     expect(status.fifoFillFrames).toBe(512);
@@ -223,6 +284,39 @@ describe('EngineStatusV1 wire', () => {
     expect(status.motionToSoundLatencyMs.p95).toBe(18.5);
     expect(status.potentiallyBinaural).toBe(true);
     expect(status.lastError).toBeNull();
+  });
+
+  it('applique les valeurs stéréo par défaut avec un ancien moteur', () => {
+    const wire: WireEngineStatusV1 = {
+      schemaVersion: 1,
+      audioMode: 'shared-low-latency',
+      captureState: 'running', renderState: 'running', trackingState: 'tracking',
+      captureSampleRate: 48_000, renderSampleRate: 48_000,
+      capturePeriodFrames: 128, renderPeriodFrames: 128, fifoFillFrames: 256,
+      xruns: 0, callbackCpuPercent: 10, trackingHz: 60,
+      latencyP50Ms: 10, latencyP95Ms: 15, resampleRatio: 1, potentiallyBinaural: false, lastError: '',
+    };
+    expect(fromWireEngineStatus(wire)).toMatchObject({
+      inputLayout: 'stereo',
+      captureChannels: 2,
+      captureChannelMask: 0x3,
+    });
+  });
+
+  it('accepte la télémétrie multicanale nulle tant que le moteur est arrêté', async () => {
+    const { isWireEngineStatusV1 } = await import('./contracts');
+    expect(isWireEngineStatusV1({
+      schemaVersion: 1,
+      audioMode: 'shared-low-latency',
+      inputLayout: '5.1-surround',
+      captureChannels: 0,
+      captureChannelMask: 0,
+      captureState: 'stopped', renderState: 'stopped', trackingState: 'lost',
+      captureSampleRate: 0, renderSampleRate: 0,
+      capturePeriodFrames: 0, renderPeriodFrames: 0, fifoFillFrames: 0,
+      xruns: 0, callbackCpuPercent: 0, trackingHz: 0,
+      latencyP50Ms: 0, latencyP95Ms: 0, resampleRatio: 1, potentiallyBinaural: false, lastError: '',
+    })).toBe(true);
   });
 
   it('rejette un statut partiel ou non fini avant adaptation', async () => {

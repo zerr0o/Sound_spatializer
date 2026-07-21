@@ -1,4 +1,4 @@
-import type { AppPreferences, AudioMode, CaptureProvider } from './contracts';
+import type { AppPreferences, AudioMode, CaptureProvider, InputLayout } from './contracts';
 
 export type WireVec3 = [number, number, number];
 export type WireQuaternionWxyz = [number, number, number, number];
@@ -64,6 +64,50 @@ export interface PersistedDesktopConfigV1 {
   preferences: AppPreferences;
 }
 
+export type WireSpeakerChannelV2 =
+  | 'front-left'
+  | 'front-right'
+  | 'front-center'
+  | 'surround-left'
+  | 'surround-right';
+
+export interface WireSpeakerV2 {
+  channel: WireSpeakerChannelV2;
+  positionM: WireVec3;
+  gainDb: number;
+  enabled: boolean;
+}
+
+/** Représentation exacte de contracts/scene-config-v2.schema.json. */
+export interface WireSceneConfigV2 {
+  schemaVersion: 2;
+  audio: {
+    captureProvider: CaptureProvider;
+    captureEndpointId: string | null;
+    outputDeviceId: string | null;
+    mode: AudioMode;
+    inputLayout: InputLayout;
+    sampleRate: 48_000;
+    bufferFrames: 64 | 128 | 256;
+    bypass: boolean;
+    masterGainDb: number;
+    roomMix: number;
+  };
+  tracking: WireSceneConfigV1['tracking'];
+  listener: WireSceneConfigV1['listener'];
+  speakers: [WireSpeakerV2, WireSpeakerV2, WireSpeakerV2, WireSpeakerV2, WireSpeakerV2];
+  lfe: { enabled: boolean; gainDb: number };
+  hrtf: WireSceneConfigV1['hrtf'];
+  headphoneEq: WireSceneConfigV1['headphoneEq'];
+  room: WireSceneConfigV1['room'];
+}
+
+export interface PersistedDesktopConfigV2 {
+  schemaVersion: 2;
+  scene: WireSceneConfigV2;
+  preferences: AppPreferences;
+}
+
 export type WireStreamState = 'stopped' | 'starting' | 'running' | 'degraded' | 'failed';
 export type WireTrackingState = 'lost' | 'tracking' | 'held' | 'returning-to-neutral';
 export type WireAudioSampleFormat = 'unknown' | 'float32' | 'pcm-s32';
@@ -73,6 +117,10 @@ export interface WireEngineStatusV1 {
   audioMode: AudioMode;
   /** Optional during a rolling upgrade from engines predating PCM32 telemetry. */
   renderSampleFormat?: WireAudioSampleFormat;
+  /** Optional while interoperating with an engine predating multichannel capture. */
+  inputLayout?: InputLayout;
+  captureChannels?: number;
+  captureChannelMask?: number;
   captureState: WireStreamState;
   renderState: WireStreamState;
   trackingState: WireTrackingState;

@@ -111,7 +111,7 @@ export function SegmentedControl<T extends string>({
   disabled = false,
 }: {
   value: T;
-  options: ReadonlyArray<{ value: T; label: string; icon?: ReactNode }>;
+  options: ReadonlyArray<{ value: T; label: string; icon?: ReactNode; disabled?: boolean; title?: string }>;
   onChange: (value: T) => void;
   ariaLabel: string;
   disabled?: boolean;
@@ -126,7 +126,8 @@ export function SegmentedControl<T extends string>({
           aria-checked={option.value === value}
           className={option.value === value ? 'is-selected' : ''}
           onClick={() => onChange(option.value)}
-          disabled={disabled}
+          disabled={disabled || option.disabled}
+          title={option.title}
         >
           {option.icon}
           {option.label}

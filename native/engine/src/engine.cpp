@@ -63,6 +63,7 @@ SpatialAudioEngine::SpatialAudioEngine(std::unique_ptr<IAudioBackend> backend) :
     hrtf_lifetime_.push_back(std::make_unique<AnalyticHrtfDatabase>(kSampleRate));
     limiter_.prepare(static_cast<float>(kSampleRate));
     limiter_.set_ceiling_db(-0.1F);
+    lfe_renderer_.prepare(static_cast<float>(kSampleRate));
     binaural_detector_.prepare(static_cast<float>(kSampleRate));
     for (auto& early : early_reflections_)
         (void)early.prepare(static_cast<float>(kSampleRate), 80.0F);
@@ -73,7 +74,7 @@ SpatialAudioEngine::SpatialAudioEngine(std::unique_ptr<IAudioBackend> backend) :
 
 SpatialAudioEngine::~SpatialAudioEngine() { stop_audio(); }
 
-bool SpatialAudioEngine::prepare_scene(const SceneConfigV1& scene, PreparedScene& prepared,
+bool SpatialAudioEngine::prepare_scene(const SceneConfigV2& scene, PreparedScene& prepared,
                                        std::string& warning_or_error, bool& is_error) {
     is_error = false;
     if (!validate_scene_config(scene, warning_or_error)) {
@@ -113,9 +114,12 @@ bool SpatialAudioEngine::prepare_scene(const SceneConfigV1& scene, PreparedScene
     }
 
     prepared = {};
-    for (std::size_t index = 0; index < 2; ++index) {
+    prepared.source_count = scene.audio.input_layout == InputLayout::surround_5_1 ? kDirectionalSourceCount : 2U;
+    for (std::size_t index = 0; index < kDirectionalSourceCount; ++index) {
         prepared.speaker_positions[index] = scene.speakers[index].position_m;
-        prepared.speaker_gains[index] = db_to_linear(scene.speakers[index].gain_db);
+        prepared.speaker_gains[index] = index < prepared.source_count && scene.speakers[index].enabled
+                                            ? db_to_linear(scene.speakers[index].gain_db)
+                                            : 0.0F;
     }
     prepared.listener_position = scene.listener.position_m;
     prepared.neutral_orientation = scene.listener.neutral_orientation.normalized_value();
@@ -127,14 +131,17 @@ bool SpatialAudioEngine::prepare_scene(const SceneConfigV1& scene, PreparedScene
     prepared.eq_preamp_db = scene.headphone_eq.preamp_db;
     prepared.room_mix = scene.audio.room_mix;
     prepared.prediction_limit_ms = scene.tracking.prediction_limit_ms;
+    prepared.lfe_gain_db = scene.lfe.gain_db;
     prepared.eq_enabled = scene.headphone_eq.enabled;
+    prepared.lfe_enabled = scene.audio.input_layout == InputLayout::surround_5_1 && scene.lfe.enabled;
     prepared.room_enabled = scene.room.enabled;
     prepared.late_reverb_enabled = scene.room.late_reverb_enabled;
     prepared.bypass = scene.audio.bypass;
 
     if (scene.room.enabled) {
         ImageSourceModel image_sources;
-        for (std::size_t source = 0; source < 2; ++source) {
+        for (std::size_t source = 0; source < prepared.source_count; ++source) {
+            if (!scene.speakers[source].enabled) continue;
             const std::vector<ReflectionTap> reflections =
                 image_sources.calculate(scene.speakers[source].position_m, scene.listener.position_m, scene.room);
             prepared.early_reflection_counts[source] =
@@ -154,8 +161,12 @@ bool SpatialAudioEngine::prepare_scene(const SceneConfigV1& scene, PreparedScene
     return true;
 }
 
-bool SpatialAudioEngine::set_scene(const SceneConfigV1& scene, std::string& error) {
+bool SpatialAudioEngine::set_scene(const SceneConfigV2& scene, std::string& error) {
     std::scoped_lock lock(control_mutex_);
+    if (backend_->running() && scene.audio.input_layout != scene_.audio.input_layout) {
+        error = "input layout changes require an audio backend restart";
+        return false;
+    }
     PreparedScene prepared{};
     bool is_error = false;
     std::string diagnostic;
@@ -178,7 +189,7 @@ bool SpatialAudioEngine::set_scene(const SceneConfigV1& scene, std::string& erro
     return true;
 }
 
-SceneConfigV1 SpatialAudioEngine::scene() const {
+SceneConfigV2 SpatialAudioEngine::scene() const {
     std::scoped_lock lock(control_mutex_);
     return scene_;
 }
@@ -209,6 +220,7 @@ bool SpatialAudioEngine::start_audio(std::string& error) {
         if (config.capture_provider == CaptureProvider::native_driver)
             config.native_test_override_endpoint_id = virtual_endpoint_id_;
         config.physical_output_endpoint_id = scene_.audio.output_device_id.value_or("");
+        config.input_layout = scene_.audio.input_layout;
         config.mode = scene_.audio.mode;
         config.requested_buffer_frames = scene_.audio.buffer_frames;
     }
@@ -237,7 +249,7 @@ bool SpatialAudioEngine::start_audio(std::string& error) {
         std::scoped_lock lock(control_mutex_);
         effective_audio_mode_.reset();
     }
-    SceneConfigV1 fallback = scene();
+    SceneConfigV2 fallback = scene();
     fallback.audio.mode = AudioMode::shared_low_latency;
     fallback.audio.buffer_frames = 128;
     std::string fallback_error;
@@ -288,10 +300,27 @@ bool SpatialAudioEngine::execute_command(const EngineCommandV1& command, std::st
         stop_audio();
         error.clear();
         return true;
-    case EngineCommandType::set_scene:
-        return set_scene(command.scene, error);
+    case EngineCommandType::set_scene: {
+        const SceneConfigV2 previous = scene();
+        if (command.scene.audio.input_layout == previous.audio.input_layout)
+            return set_scene(command.scene, error);
+        if (!validate_scene_config(command.scene, error)) return false;
+        const bool was_running = backend_->running();
+        if (was_running) stop_audio();
+        if (set_scene(command.scene, error) && (!was_running || start_audio(error))) return true;
+
+        const std::string layout_error = error;
+        stop_audio();
+        std::string restore_error;
+        const bool scene_restored = set_scene(previous, restore_error);
+        const bool audio_restored = scene_restored && (!was_running || start_audio(restore_error));
+        error = "input layout change rejected: " + layout_error;
+        if (!scene_restored || !audio_restored)
+            error += "; previous scene restoration failed: " + restore_error;
+        return false;
+    }
     case EngineCommandType::set_bypass: {
-        SceneConfigV1 updated = scene();
+        SceneConfigV2 updated = scene();
         updated.audio.bypass = command.bool_value;
         return set_scene(updated, error);
     }
@@ -299,7 +328,7 @@ bool SpatialAudioEngine::execute_command(const EngineCommandV1& command, std::st
         const bool was_running = backend_->running();
         if (was_running)
             stop_audio();
-        SceneConfigV1 updated = scene();
+        SceneConfigV2 updated = scene();
         updated.audio.output_device_id =
             command.string_value.empty() ? std::nullopt : std::optional<std::string>(command.string_value);
         if (!set_scene(updated, error))
@@ -307,11 +336,11 @@ bool SpatialAudioEngine::execute_command(const EngineCommandV1& command, std::st
         return !was_running || start_audio(error);
     }
     case EngineCommandType::set_audio_mode: {
-        const SceneConfigV1 previous = scene();
+        const SceneConfigV2 previous = scene();
         const bool was_running = backend_->running();
         if (was_running)
             stop_audio();
-        SceneConfigV1 updated = previous;
+        SceneConfigV2 updated = previous;
         updated.audio.mode = command.audio_mode;
         updated.audio.buffer_frames = command.audio_mode == AudioMode::compatibility_256 ? 256 : 128;
         if (!set_scene(updated, error)) {
@@ -340,24 +369,24 @@ bool SpatialAudioEngine::execute_command(const EngineCommandV1& command, std::st
         return false;
     }
     case EngineCommandType::calibrate_neutral: {
-        SceneConfigV1 updated = scene();
+        SceneConfigV2 updated = scene();
         updated.listener.neutral_orientation = command.quaternion_value.normalized_value();
         return set_scene(updated, error);
     }
     case EngineCommandType::set_hrtf: {
-        SceneConfigV1 updated = scene();
+        SceneConfigV2 updated = scene();
         updated.hrtf.profile_id = command.string_value;
         updated.hrtf.sofa_path = command.optional_string_value;
         return set_scene(updated, error);
     }
     case EngineCommandType::set_headphone_eq: {
-        SceneConfigV1 updated = scene();
+        SceneConfigV2 updated = scene();
         updated.headphone_eq = command.headphone_eq;
         return set_scene(updated, error);
     }
     case EngineCommandType::set_audio_route: {
-        const SceneConfigV1 previous = scene();
-        SceneConfigV1 updated = previous;
+        const SceneConfigV2 previous = scene();
+        SceneConfigV2 updated = previous;
         updated.audio.capture_provider = command.capture_provider;
         updated.audio.capture_endpoint_id = command.capture_endpoint_id;
         updated.audio.output_device_id = command.output_device_id;
@@ -395,7 +424,12 @@ bool SpatialAudioEngine::execute_command(const EngineCommandV1& command, std::st
 }
 
 void SpatialAudioEngine::apply_prepared_scene(const PreparedScene& prepared, bool realtime_transition) noexcept {
+    const bool input_layout_changed = active_scene_.source_count != prepared.source_count;
     active_scene_ = prepared;
+    if (input_layout_changed) {
+        binaural_detector_.reset();
+        potentially_binaural_.store(false, std::memory_order_relaxed);
+    }
     const std::span<const BiquadParameters> eq_sections(active_scene_.eq_sections.data(),
                                                         active_scene_.eq_section_count);
     if (!headphone_eq_.configuration_matches(eq_sections, static_cast<float>(kSampleRate))) {
@@ -407,8 +441,12 @@ void SpatialAudioEngine::apply_prepared_scene(const PreparedScene& prepared, boo
     } else {
         bypass_crossfade_.reset(active_scene_.bypass);
     }
-    limiter_.set_master_gain_db(active_scene_.master_gain_db +
-                                (active_scene_.eq_enabled ? active_scene_.eq_preamp_db : 0.0F));
+    // Master gain and protection are common to both branches. EQ preamp belongs
+    // exclusively to the processed branch so a true bypass never inherits its
+    // attenuation during or after the crossfade.
+    limiter_.set_master_gain_db(active_scene_.master_gain_db);
+    lfe_renderer_.configure(active_scene_.lfe_enabled, active_scene_.lfe_gain_db,
+                            realtime_transition ? 4'800U : 0U);
     late_reverb_.configure_rt60(active_scene_.late_rt60);
     if (!active_scene_.room_enabled || !active_scene_.late_reverb_enabled)
         late_reverb_.reset();
@@ -448,9 +486,10 @@ void SpatialAudioEngine::request_hrtf_for_pose(const Quaternionf& orientation) n
     request.scene_revision = active_scene_revision_;
     request.database = active_scene_.hrtf;
     request.speaker_gains = active_scene_.speaker_gains;
+    request.source_count = active_scene_.source_count;
     request.world_to_head = world_to_head;
     request.room_enabled = active_scene_.room_enabled;
-    for (std::size_t index = 0; index < 2; ++index) {
+    for (std::size_t index = 0; index < active_scene_.source_count; ++index) {
         const Vec3f world_direction = active_scene_.speaker_positions[index] - active_scene_.listener_position;
         request.head_relative_directions[index] = rotate(world_to_head, world_direction);
     }
@@ -530,9 +569,23 @@ void SpatialAudioEngine::reset_latency_diagnostics() noexcept {
     latency_tracking_continuous_ = false;
 }
 
-void SpatialAudioEngine::process_chunk(const StereoFrame* input, StereoFrame* output, std::size_t frame_count,
+void SpatialAudioEngine::process_chunk(const ProgrammeFrame* input, StereoFrame* output, std::size_t frame_count,
                                        double render_time_seconds) noexcept {
-    std::copy_n(input, frame_count, bypass_dry_.begin());
+    for (std::size_t index = 0; index < frame_count; ++index) {
+        const ProgrammeFrame& programme = input[index];
+        DirectionalFrame& directional = directional_input_[index];
+        directional.sources = {
+            programme.front_left,
+            programme.front_right,
+            active_scene_.source_count > 2 ? programme.front_center : 0.0F,
+            active_scene_.source_count > 2 ? programme.surround_left : 0.0F,
+            active_scene_.source_count > 2 ? programme.surround_right : 0.0F,
+        };
+        const float lfe = active_scene_.source_count > 2 ? programme.lfe : 0.0F;
+        lfe_bed_[index] = lfe_renderer_.process_sample(lfe);
+        bypass_dry_[index] = downmix_programme_to_stereo(programme, lfe_bed_[index]);
+        detector_input_[index] = {programme.front_left, programme.front_right};
+    }
     const StereoFrame* dry_input = bypass_dry_.data();
     const HeadPoseSampleV1 raw_pose = pose_mailbox_.load();
     HeadPoseSampleV1 rendered_pose{};
@@ -572,24 +625,30 @@ void SpatialAudioEngine::process_chunk(const StereoFrame* input, StereoFrame* ou
     tracking_state_.store(static_cast<std::uint32_t>(rendered_pose.tracking_state), std::memory_order_relaxed);
     request_hrtf_for_pose(rendered_pose.orientation);
     consume_prepared_hrtf();
-    binaural_detector_.process(dry_input, frame_count);
-    potentially_binaural_.store(binaural_detector_.potentially_binaural(), std::memory_order_relaxed);
+    if (active_scene_.source_count == 2) {
+        binaural_detector_.process(detector_input_.data(), frame_count);
+        potentially_binaural_.store(binaural_detector_.potentially_binaural(), std::memory_order_relaxed);
+    } else {
+        potentially_binaural_.store(false, std::memory_order_relaxed);
+    }
 
-    convolver_.process(dry_input, output, frame_count);
+    convolver_.process(directional_input_.data(), output, frame_count);
     if (active_scene_.room_enabled && active_scene_.room_mix > 0.0F) {
-        for (std::size_t index = 0; index < frame_count; ++index) {
-            room_mono_[index] = dry_input[index].left * active_scene_.speaker_gains[0];
+        for (std::size_t index = 0; index < frame_count; ++index) room_early_[index].fill(0.0F);
+        for (std::size_t source = 0; source < active_scene_.source_count; ++source) {
+            for (std::size_t index = 0; index < frame_count; ++index)
+                room_mono_[index] = directional_input_[index].sources[source] * active_scene_.speaker_gains[source];
+            early_reflections_[source].process(room_mono_.data(), room_early_secondary_.data(), frame_count);
+            for (std::size_t index = 0; index < frame_count; ++index) {
+                for (std::size_t channel = 0; channel < EarlyReflectionProcessor::kAmbisonicChannels; ++channel)
+                    room_early_[index][channel] += room_early_secondary_[index][channel];
+            }
         }
-        early_reflections_[0].process(room_mono_.data(), room_early_.data(), frame_count);
-        for (std::size_t index = 0; index < frame_count; ++index)
-            room_mono_[index] = dry_input[index].right * active_scene_.speaker_gains[1];
-        early_reflections_[1].process(room_mono_.data(), room_early_secondary_.data(), frame_count);
         for (std::size_t index = 0; index < frame_count; ++index) {
-            for (std::size_t channel = 0; channel < EarlyReflectionProcessor::kAmbisonicChannels; ++channel)
-                room_early_[index][channel] += room_early_secondary_[index][channel];
-            room_mono_[index] = (dry_input[index].left * active_scene_.speaker_gains[0] +
-                                 dry_input[index].right * active_scene_.speaker_gains[1]) *
-                                0.5F;
+            float late_input = 0.0F;
+            for (std::size_t source = 0; source < active_scene_.source_count; ++source)
+                late_input += directional_input_[index].sources[source] * active_scene_.speaker_gains[source];
+            room_mono_[index] = late_input / static_cast<float>(active_scene_.source_count);
         }
         if (active_scene_.late_reverb_enabled) {
             late_reverb_.process_mono(room_mono_.data(), room_ambi_.data(), frame_count);
@@ -609,12 +668,25 @@ void SpatialAudioEngine::process_chunk(const StereoFrame* input, StereoFrame* ou
             output[index].right = output[index].right * dry_gain + room_binaural_[index].right * wet_gain;
         }
     }
+    constexpr float equal_power_mono = 0.70710678F;
+    for (std::size_t index = 0; index < frame_count; ++index) {
+        const float lfe = lfe_bed_[index] * equal_power_mono;
+        output[index].left += lfe;
+        output[index].right += lfe;
+    }
     headphone_eq_.process(output, frame_count);
-    limiter_.process(output, frame_count);
+    if (active_scene_.eq_enabled) {
+        const float eq_preamp = db_to_linear(active_scene_.eq_preamp_db);
+        for (std::size_t index = 0; index < frame_count; ++index) {
+            output[index].left *= eq_preamp;
+            output[index].right *= eq_preamp;
+        }
+    }
     bypass_crossfade_.process(dry_input, output, frame_count);
+    limiter_.process(output, frame_count);
 }
 
-void SpatialAudioEngine::process_audio(const StereoFrame* input, StereoFrame* output, std::size_t frame_count,
+void SpatialAudioEngine::process_audio(const ProgrammeFrame* input, StereoFrame* output, std::size_t frame_count,
                                        std::int64_t render_qpc) noexcept {
     if (output == nullptr)
         return;
@@ -626,7 +698,7 @@ void SpatialAudioEngine::process_audio(const StereoFrame* input, StereoFrame* ou
     while (offset < frame_count) {
         const std::size_t chunk = std::min(kMaximumProcessChunk, frame_count - offset);
         if (input == nullptr) {
-            std::array<StereoFrame, kMaximumProcessChunk> silence{};
+            std::array<ProgrammeFrame, kMaximumProcessChunk> silence{};
             process_chunk(silence.data(), output + offset, chunk,
                           render_time + static_cast<double>(offset) / kSampleRate);
         } else {
@@ -644,6 +716,8 @@ EngineStatusV1 SpatialAudioEngine::status() const {
     result.render_state = audio.render_state;
     result.tracking_state = static_cast<TrackingState>(tracking_state_.load(std::memory_order_relaxed));
     result.capture_sample_rate = audio.capture_sample_rate;
+    result.capture_channels = audio.capture_channels;
+    result.capture_channel_mask = audio.capture_channel_mask;
     result.render_sample_rate = audio.render_sample_rate;
     result.render_sample_format = audio.render_sample_format;
     result.capture_period_frames = audio.capture_period_frames;
@@ -659,6 +733,7 @@ EngineStatusV1 SpatialAudioEngine::status() const {
     {
         std::scoped_lock lock(control_mutex_);
         result.audio_mode = effective_audio_mode_.value_or(scene_.audio.mode);
+        result.input_layout = scene_.audio.input_layout;
         result.last_error = audio.last_error;
         const auto append_warning = [&result](const std::string& warning) {
             if (warning.empty()) return;

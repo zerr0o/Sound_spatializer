@@ -29,8 +29,8 @@ public:
     SpatialAudioEngine(const SpatialAudioEngine&) = delete;
     SpatialAudioEngine& operator=(const SpatialAudioEngine&) = delete;
 
-    [[nodiscard]] bool set_scene(const SceneConfigV1& scene, std::string& error);
-    [[nodiscard]] SceneConfigV1 scene() const;
+    [[nodiscard]] bool set_scene(const SceneConfigV2& scene, std::string& error);
+    [[nodiscard]] SceneConfigV2 scene() const;
     void submit_head_pose(const HeadPoseSampleV1& pose) noexcept;
     void set_virtual_endpoint_id(std::string endpoint_id);
 
@@ -40,26 +40,30 @@ public:
     [[nodiscard]] EngineStatusV1 status() const;
     [[nodiscard]] std::size_t cached_personal_hrtf_count() const;
 
-    void process_audio(const StereoFrame* input, StereoFrame* output, std::size_t frame_count,
+    void process_audio(const ProgrammeFrame* input, StereoFrame* output, std::size_t frame_count,
                        std::int64_t render_qpc) noexcept override;
 
 private:
     struct PreparedScene {
-        std::array<Vec3f, 2> speaker_positions{};
-        std::array<float, 2> speaker_gains{};
+        std::array<Vec3f, kDirectionalSourceCount> speaker_positions{};
+        std::array<float, kDirectionalSourceCount> speaker_gains{};
+        std::size_t source_count{2};
         Vec3f listener_position{};
         Quaternionf neutral_orientation{};
         std::array<BiquadParameters, kMaximumEqSections> eq_sections{};
         std::size_t eq_section_count{};
-        std::array<std::array<ReflectionTap, EarlyReflectionProcessor::kMaximumReflectionTaps>, 2> early_reflections{};
-        std::array<std::size_t, 2> early_reflection_counts{};
+        std::array<std::array<ReflectionTap, EarlyReflectionProcessor::kMaximumReflectionTaps>,
+                   kDirectionalSourceCount> early_reflections{};
+        std::array<std::size_t, kDirectionalSourceCount> early_reflection_counts{};
         const IHrtfDatabase* hrtf{};
         MaterialBands late_rt60{};
         float master_gain_db{-6.0F};
         float eq_preamp_db{};
         float room_mix{};
         float prediction_limit_ms{20.0F};
+        float lfe_gain_db{};
         bool eq_enabled{};
+        bool lfe_enabled{true};
         bool room_enabled{};
         bool late_reverb_enabled{};
         bool bypass{};
@@ -67,20 +71,20 @@ private:
 
     static_assert(std::is_trivially_copyable_v<PreparedScene>);
 
-    [[nodiscard]] bool prepare_scene(const SceneConfigV1& scene, PreparedScene& prepared, std::string& warning_or_error,
+    [[nodiscard]] bool prepare_scene(const SceneConfigV2& scene, PreparedScene& prepared, std::string& warning_or_error,
                                      bool& is_error);
     void apply_prepared_scene(const PreparedScene& prepared, bool realtime_transition) noexcept;
     void request_hrtf_for_pose(const Quaternionf& orientation) noexcept;
     void consume_prepared_hrtf() noexcept;
     void reset_latency_diagnostics() noexcept;
-    void process_chunk(const StereoFrame* input, StereoFrame* output, std::size_t frame_count,
+    void process_chunk(const ProgrammeFrame* input, StereoFrame* output, std::size_t frame_count,
                        double render_time_seconds) noexcept;
     [[nodiscard]] static std::int64_t current_qpc() noexcept;
     [[nodiscard]] static double qpc_to_seconds(std::int64_t value) noexcept;
 
     std::unique_ptr<IAudioBackend> backend_{};
     mutable std::mutex control_mutex_{};
-    SceneConfigV1 scene_{};
+    SceneConfigV2 scene_{};
     std::string virtual_endpoint_id_{};
     std::string hrtf_warning_{};
     // Persistent, non-fatal diagnostic when a requested hardware audio mode
@@ -122,13 +126,15 @@ private:
     BypassCrossfade bypass_crossfade_{};
     StereoParametricEq headphone_eq_{};
     TruePeakLimiter limiter_{};
+    LfeRenderer lfe_renderer_{};
     PotentialBinauralDetector binaural_detector_{};
     std::atomic<bool> potentially_binaural_{};
-    std::array<EarlyReflectionProcessor, 2> early_reflections_{};
+    std::array<EarlyReflectionProcessor, kDirectionalSourceCount> early_reflections_{};
     AmbisonicBinauralDecoderOrder3 room_decoder_{};
     LateReverbFdn16 late_reverb_{};
     static constexpr std::size_t kMaximumProcessChunk = 2'048;
     std::array<float, kMaximumProcessChunk> room_mono_{};
+    std::array<float, kMaximumProcessChunk> lfe_bed_{};
     std::array<std::array<float, LateReverbFdn16::kOutputChannels>, kMaximumProcessChunk> room_ambi_{};
     std::array<std::array<float, EarlyReflectionProcessor::kAmbisonicChannels>, kMaximumProcessChunk> room_early_{};
     std::array<std::array<float, EarlyReflectionProcessor::kAmbisonicChannels>, kMaximumProcessChunk>
@@ -136,6 +142,8 @@ private:
     std::array<std::array<float, EarlyReflectionProcessor::kAmbisonicChannels>, kMaximumProcessChunk> room_combined_{};
     std::array<StereoFrame, kMaximumProcessChunk> room_binaural_{};
     std::array<StereoFrame, kMaximumProcessChunk> bypass_dry_{};
+    std::array<StereoFrame, kMaximumProcessChunk> detector_input_{};
+    std::array<DirectionalFrame, kMaximumProcessChunk> directional_input_{};
 };
 
 } // namespace sound_spatializer

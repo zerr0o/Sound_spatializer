@@ -20,6 +20,8 @@ inline constexpr std::uint32_t kSampleRate = 48'000;
 inline constexpr std::size_t kTimeDomainHrirTaps = 512;
 inline constexpr std::size_t kMaximumHrirTaps = 4'096;
 inline constexpr std::size_t kMaximumEqSections = 16;
+inline constexpr std::size_t kProgrammeChannelCount = 6;
+inline constexpr std::size_t kDirectionalSourceCount = 5;
 
 enum class TrackingState : std::uint32_t {
     unavailable = 0,
@@ -65,11 +67,26 @@ struct HeadPosePacketV1 {
 
 static_assert(sizeof(HeadPosePacketV1) == 64, "The pose wire format is ABI-stable");
 
-enum class SpeakerChannel : std::uint32_t { left = 0, right = 1 };
+// Programme order follows KSAUDIO_SPEAKER_5POINT1_SURROUND:
+// FL, FR, FC, LFE, SL, SR. LFE deliberately has no SpeakerConfig because it
+// is rendered as a head-invariant low-frequency bed rather than a point source.
+enum class SpeakerChannel : std::uint32_t {
+    front_left = 0,
+    front_right = 1,
+    front_center = 2,
+    surround_left = 3,
+    surround_right = 4,
+};
 
 struct SpeakerConfig {
-    SpeakerChannel channel{SpeakerChannel::left};
+    SpeakerChannel channel{SpeakerChannel::front_left};
     Vec3f position_m{};
+    float gain_db{};
+    bool enabled{true};
+};
+
+struct LfeConfig {
+    bool enabled{true};
     float gain_db{};
 };
 
@@ -107,6 +124,11 @@ enum class AudioMode : std::uint32_t {
     compatibility_256 = 2,
 };
 
+enum class InputLayout : std::uint32_t {
+    stereo = 0,
+    surround_5_1 = 1,
+};
+
 enum class CaptureProvider : std::uint32_t {
     native_driver = 0,
     external_render = 1,
@@ -137,6 +159,7 @@ struct AudioConfig {
     CaptureProvider capture_provider{CaptureProvider::native_driver};
     std::optional<std::string> capture_endpoint_id{};
     std::optional<std::string> output_device_id{};
+    InputLayout input_layout{InputLayout::stereo};
     AudioMode mode{AudioMode::shared_low_latency};
     std::uint32_t sample_rate{kSampleRate};
     std::uint32_t buffer_frames{128};
@@ -157,14 +180,18 @@ struct HrtfConfig {
     std::optional<std::string> sofa_path{};
 };
 
-struct SceneConfigV1 {
-    std::uint32_t schema_version{1};
+struct SceneConfigV2 {
+    std::uint32_t schema_version{2};
     AudioConfig audio{};
     TrackingConfig tracking{};
-    std::array<SpeakerConfig, 2> speakers{
-        SpeakerConfig{SpeakerChannel::left, {-1.0F, 1.2F, 1.7320508F}, 0.0F},
-        SpeakerConfig{SpeakerChannel::right, {1.0F, 1.2F, 1.7320508F}, 0.0F},
+    std::array<SpeakerConfig, kDirectionalSourceCount> speakers{
+        SpeakerConfig{SpeakerChannel::front_left, {-1.0F, 1.2F, 1.7320508F}, 0.0F, true},
+        SpeakerConfig{SpeakerChannel::front_right, {1.0F, 1.2F, 1.7320508F}, 0.0F, true},
+        SpeakerConfig{SpeakerChannel::front_center, {0.0F, 1.2F, 2.0F}, 0.0F, true},
+        SpeakerConfig{SpeakerChannel::surround_left, {-1.8793852F, 1.2F, -0.6840403F}, 0.0F, true},
+        SpeakerConfig{SpeakerChannel::surround_right, {1.8793852F, 1.2F, -0.6840403F}, 0.0F, true},
     };
+    LfeConfig lfe{};
     ListenerConfig listener{{0.0F, 1.2F, 0.0F}, {}};
     HrtfConfig hrtf{};
     HeadphoneEqConfig headphone_eq{};
@@ -196,7 +223,7 @@ struct EngineCommandV1 {
     CaptureProvider capture_provider{CaptureProvider::native_driver};
     std::optional<std::string> capture_endpoint_id{};
     std::optional<std::string> output_device_id{};
-    SceneConfigV1 scene{};
+    SceneConfigV2 scene{};
 };
 
 enum class StreamState : std::uint32_t { stopped, starting, running, degraded, failed };
@@ -212,7 +239,10 @@ struct EngineStatusV1 {
     StreamState render_state{StreamState::stopped};
     TrackingState tracking_state{TrackingState::unavailable};
     AudioMode audio_mode{AudioMode::shared_low_latency};
+    InputLayout input_layout{InputLayout::stereo};
     AudioSampleFormat render_sample_format{AudioSampleFormat::unknown};
+    std::uint32_t capture_channels{};
+    std::uint32_t capture_channel_mask{};
     std::uint32_t capture_sample_rate{};
     std::uint32_t render_sample_rate{};
     std::uint32_t capture_period_frames{};

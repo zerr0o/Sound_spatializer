@@ -21,6 +21,7 @@ struct AudioBackendConfig {
     // environment variable. It is deliberately ignored outside native mode.
     std::string native_test_override_endpoint_id{};
     std::string physical_output_endpoint_id{};
+    InputLayout input_layout{InputLayout::stereo};
     AudioMode mode{AudioMode::shared_low_latency};
     std::uint32_t requested_buffer_frames{128};
 };
@@ -28,6 +29,8 @@ struct AudioBackendConfig {
 struct AudioBackendDiagnostics {
     StreamState capture_state{StreamState::stopped};
     StreamState render_state{StreamState::stopped};
+    std::uint32_t capture_channels{};
+    std::uint32_t capture_channel_mask{};
     std::uint32_t capture_sample_rate{};
     std::uint32_t render_sample_rate{};
     AudioSampleFormat render_sample_format{AudioSampleFormat::unknown};
@@ -40,6 +43,25 @@ struct AudioBackendDiagnostics {
     float resample_ratio{1.0F};
     std::string last_error{};
 };
+
+inline constexpr std::uint32_t kStereoChannelMask = 0x0000'0003U;
+inline constexpr std::uint32_t kSurround51BackChannelMask = 0x0000'003FU;
+inline constexpr std::uint32_t kSurround51ChannelMask = 0x0000'060FU;
+
+[[nodiscard]] constexpr bool is_supported_surround_5_1_channel_mask(
+    std::uint32_t channel_mask) noexcept {
+    return channel_mask == kSurround51BackChannelMask ||
+           channel_mask == kSurround51ChannelMask;
+}
+
+[[nodiscard]] constexpr std::uint32_t expected_input_channel_count(
+    InputLayout layout) noexcept {
+    switch (layout) {
+    case InputLayout::stereo: return 2U;
+    case InputLayout::surround_5_1: return 6U;
+    }
+    return 0U;
+}
 
 // Selection policy is platform-neutral so the priority is unit-tested even
 // though the concrete WAVEFORMATEX probing lives in the Windows backend.
@@ -206,7 +228,7 @@ struct CaptureDrainBudget {
 class IAudioProcessor {
 public:
     virtual ~IAudioProcessor() = default;
-    virtual void process_audio(const StereoFrame* input, StereoFrame* output, std::size_t frame_count,
+    virtual void process_audio(const ProgrammeFrame* input, StereoFrame* output, std::size_t frame_count,
                                std::int64_t render_qpc) noexcept = 0;
 };
 
@@ -228,6 +250,11 @@ public:
     [[nodiscard]] bool running() const noexcept override { return running_; }
     [[nodiscard]] AudioBackendDiagnostics diagnostics() const override { return diagnostics_; }
 
+    void process_block(const ProgrammeFrame* input, StereoFrame* output, std::size_t frame_count,
+                       std::int64_t render_qpc = 0) noexcept;
+    // Compatibility helper for existing stereo-only engine tests and embedders.
+    // The samples are expanded into FL/FR while every other programme channel
+    // remains silent before entering the common six-channel processor contract.
     void process_block(const StereoFrame* input, StereoFrame* output, std::size_t frame_count,
                        std::int64_t render_qpc = 0) noexcept;
 

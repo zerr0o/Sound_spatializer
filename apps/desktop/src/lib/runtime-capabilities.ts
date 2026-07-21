@@ -1,4 +1,4 @@
-import type { AudioDeviceSummary, CaptureProvider, SceneConfigV1 } from '../types/contracts';
+import type { AudioDeviceSummary, CaptureProvider, InputLayout, SceneConfigV2 } from '../types/contracts';
 
 export type AudioRouteIssue =
   | 'desktop-runtime-required'
@@ -6,6 +6,7 @@ export type AudioRouteIssue =
   | 'capture-endpoint-required'
   | 'capture-endpoint-unavailable'
   | 'capture-endpoint-is-native'
+  | 'capture-layout-unsupported'
   | 'output-endpoint-required'
   | 'output-endpoint-unavailable'
   | 'output-endpoint-is-native'
@@ -15,6 +16,7 @@ export interface AudioRouteSelection {
   captureProvider: CaptureProvider;
   captureEndpointId: string | null;
   physicalOutputDeviceId: string | null;
+  inputLayout: InputLayout;
 }
 
 export interface RuntimeCapabilities {
@@ -38,12 +40,16 @@ const findEndpoint = (devices: AudioDeviceSummary[], id: string | null): AudioDe
   return devices.find((device) => sameAudioEndpoint(device.id, id)) ?? null;
 };
 
+export const supportsSurround5_1 = (device: AudioDeviceSummary | null | undefined): boolean =>
+  device?.channelCount === 6 && (device.channelMask === 0x3f || device.channelMask === 0x60f);
+
 export const routeSelectionFromScene = (
-  scene: Pick<SceneConfigV1, 'captureProvider' | 'captureEndpointId' | 'physicalOutputDeviceId'>,
+  scene: Pick<SceneConfigV2, 'captureProvider' | 'captureEndpointId' | 'physicalOutputDeviceId' | 'inputLayout'>,
 ): AudioRouteSelection => ({
   captureProvider: scene.captureProvider,
   captureEndpointId: scene.captureEndpointId,
   physicalOutputDeviceId: scene.physicalOutputDeviceId,
+  inputLayout: scene.inputLayout,
 });
 
 export const isAudioRouteStructurallyComplete = (selection: AudioRouteSelection): boolean => {
@@ -73,6 +79,8 @@ export const deriveRuntimeCapabilities = (
   else if (selection.captureProvider === 'external-render' && !selection.captureEndpointId) routeIssue = 'capture-endpoint-required';
   else if (selection.captureProvider === 'external-render' && !captureEndpoint) routeIssue = 'capture-endpoint-unavailable';
   else if (selection.captureProvider === 'external-render' && captureEndpoint?.isSoundSpatializerEndpoint) routeIssue = 'capture-endpoint-is-native';
+  else if (selection.inputLayout === '5.1-surround' &&
+    (selection.captureProvider !== 'external-render' || !supportsSurround5_1(captureEndpoint))) routeIssue = 'capture-layout-unsupported';
   else if (!selection.physicalOutputDeviceId) routeIssue = 'output-endpoint-required';
   else if (!outputEndpoint) routeIssue = 'output-endpoint-unavailable';
   else if (outputEndpoint.isSoundSpatializerEndpoint) routeIssue = 'output-endpoint-is-native';
