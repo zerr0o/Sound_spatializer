@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="$(var.ProductName)"
+      Manufacturer="Sound Spatializer"
+      Language="1036"
+      Version="$(var.ProductVersion)"
+      UpgradeCode="$(var.ProductUpgradeCode)"
+      Scope="perMachine"
+      Compressed="yes">
+
+    <SummaryInformation Description="$(var.ProductName) - application binaurale head-trackée" />
+    <?if $(var.PackageMode) = Preview ?>
+    <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="Une version plus récente de Sound Spatializer Preview est déjà installée."
+        Schedule="afterInstallInitialize" />
+    <?else?>
+    <MajorUpgrade
+        DowngradeErrorMessage="Une version plus récente de Sound Spatializer est déjà installée."
+        Schedule="afterInstallInitialize" />
+    <?endif?>
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="$(var.InstallFolderName)">
+        <Component Id="ApplicationComponent" Guid="$(var.ApplicationComponentGuid)">
+          <File Id="DesktopExecutable" Name="SoundSpatializer.exe" Source="$(var.DesktopExecutable)" KeyPath="yes">
+            <?if $(var.PackageMode) = Preview ?>
+            <Shortcut
+                Id="PreviewStartMenuShortcut"
+                Directory="ProgramMenuFolder"
+                Name="Sound Spatializer Preview"
+                Description="Ouvrir Sound Spatializer Preview"
+                Advertise="yes"
+                WorkingDirectory="INSTALLFOLDER" />
+            <?endif?>
+          </File>
+        </Component>
+        <Component Id="EngineComponent" Guid="$(var.EngineComponentGuid)">
+          <File Id="EngineExecutable" Name="SoundSpatializer.Engine.exe" Source="$(var.EngineExecutable)" KeyPath="yes" />
+          <?if $(var.PackageMode) = Production ?>
+          <RegistryValue
+              Root="HKLM"
+              Key="Software\Microsoft\Windows\CurrentVersion\Run"
+              Name="SoundSpatializer.Engine"
+              Type="string"
+              Value="&quot;[#EngineExecutable]&quot; --autostart" />
+          <?endif?>
+        </Component>
+        <Component Id="NoticesComponent" Guid="$(var.NoticesComponentGuid)">
+          <File Id="ProductThirdPartyNotices" Name="THIRD_PARTY_NOTICES.md" Source="$(var.RepositoryRoot)\THIRD_PARTY_NOTICES.md" KeyPath="yes" />
+          <?if $(var.PackageMode) = Production ?>
+          <File Id="DriverThirdPartyNotices" Name="THIRD_PARTY_NOTICES_DRIVER.md" Source="$(var.RepositoryRoot)\native\driver\THIRD_PARTY_NOTICES.md" />
+          <?endif?>
+          <File Id="InstallerThirdPartyNotices" Name="THIRD_PARTY_NOTICES_INSTALLER_BUILD.md" Source="$(var.RepositoryRoot)\installer\wix\THIRD_PARTY_NOTICES.md" />
+        </Component>
+
+        <!-- The SOFA files are host-only resources and exist exactly once,
+             below resource_dir()/hrtf. MediaPipe/model assets are Vite assets
+             embedded in the Tauri executable and must not be duplicated here. -->
+        <Directory Id="HrtfDir" Name="hrtf">
+          <Component Id="HrtfMetadataComponent" Guid="$(var.HrtfMetadataComponentGuid)">
+            <File Id="HrtfNotice" Source="$(var.DesktopResourcesDirectory)\hrtf\NOTICE.md" KeyPath="yes" />
+            <File Id="HrtfProfiles" Source="$(var.DesktopResourcesDirectory)\hrtf\profiles.json" />
+          </Component>
+          <Directory Id="HrtfDataDir" Name="data">
+            <Component Id="HrtfDataComponent" Guid="$(var.HrtfDataComponentGuid)">
+              <File Id="HrtfSadieD2Kemar" Source="$(var.DesktopResourcesDirectory)\hrtf\data\sadie-d2-kemar.sofa" KeyPath="yes" />
+              <File Id="HrtfSadieH6" Source="$(var.DesktopResourcesDirectory)\hrtf\data\sadie-h6.sofa" />
+              <File Id="HrtfSadieH9" Source="$(var.DesktopResourcesDirectory)\hrtf\data\sadie-h9.sofa" />
+              <File Id="HrtfSadieH10" Source="$(var.DesktopResourcesDirectory)\hrtf\data\sadie-h10.sofa" />
+              <File Id="HrtfSadieH19" Source="$(var.DesktopResourcesDirectory)\hrtf\data\sadie-h19.sofa" />
+              <File Id="HrtfSadieH20" Source="$(var.DesktopResourcesDirectory)\hrtf\data\sadie-h20.sofa" />
+            </Component>
+          </Directory>
+        </Directory>
+
+        <?if $(var.PackageMode) = Production ?>
+        <Directory Id="DriverDir" Name="driver">
+          <Component Id="DriverPackageComponent" Guid="{8EAC1838-ACB3-4118-BA76-B1B99EC8973A}">
+            <File Id="DriverInf" Source="$(var.DriverPackageDirectory)\SoundSpatializerAudio.inf" KeyPath="yes" />
+            <File Id="DriverSys" Source="$(var.DriverPackageDirectory)\SoundSpatializerAudio.sys" />
+            <File Id="DriverCat" Source="$(var.DriverPackageDirectory)\SoundSpatializerAudio.cat" />
+          </Component>
+          <Component Id="DriverScriptsComponent" Guid="{3005F7BD-8379-4542-B0F6-70A9516F34A9}">
+            <File Id="DriverCommonScript" Source="$(var.DriverScriptsDirectory)\Common.ps1" KeyPath="yes" />
+            <File Id="InstallDriverScript" Source="$(var.DriverScriptsDirectory)\Install-Driver.ps1" />
+            <File Id="UninstallDriverScript" Source="$(var.DriverScriptsDirectory)\Uninstall-Driver.ps1" />
+            <File Id="CompleteDriverInstallScript" Source="$(var.DriverScriptsDirectory)\Complete-DriverInstall.ps1" />
+            <File Id="DriverToolExecutable" Source="$(var.DriverToolExecutable)" />
+          </Component>
+        </Directory>
+        <?endif?>
+      </Directory>
+    </StandardDirectory>
+
+    <?if $(var.PackageMode) = Preview ?>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <?endif?>
+
+    <Feature Id="Complete" Title="Sound Spatializer" Level="1">
+      <ComponentRef Id="ApplicationComponent" />
+      <ComponentRef Id="EngineComponent" />
+      <ComponentRef Id="NoticesComponent" />
+      <ComponentRef Id="HrtfMetadataComponent" />
+      <ComponentRef Id="HrtfDataComponent" />
+      <?if $(var.PackageMode) = Production ?>
+      <ComponentRef Id="DriverPackageComponent" />
+      <ComponentRef Id="DriverScriptsComponent" />
+      <?endif?>
+    </Feature>
+
+    <?if $(var.PackageMode) = Preview ?>
+    <!-- This immediate action lives exclusively in the full UI sequence. It
+         therefore never runs for /qn or basic UI installs and, unlike an
+         execute-sequence action, does not inherit the elevated MSI server
+         token. The explicit impersonation bit is validated in the MSI table. -->
+    <CustomAction
+        Id="LaunchPreview"
+        FileRef="DesktopExecutable"
+        ExeCommand=""
+        Execute="immediate"
+        Impersonate="yes"
+        Return="asyncNoWait" />
+
+    <InstallUISequence>
+      <Custom
+          Action="LaunchPreview"
+          After="ExecuteAction"
+          Condition="NOT Installed AND UILevel &gt;= 4 AND NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallUISequence>
+    <?endif?>
+
+    <?if $(var.PackageMode) = Production ?>
+    <CustomAction
+        Id="RollbackDriver"
+        Directory="DriverDir"
+        ExeCommand="&quot;[WindowsFolder]System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[#UninstallDriverScript]&quot; -Rollback -DriverToolPath &quot;[#DriverToolExecutable]&quot;"
+        Execute="rollback"
+        Impersonate="no"
+        Return="ignore" />
+    <CustomAction
+        Id="InstallDriver"
+        Directory="DriverDir"
+        ExeCommand="&quot;[WindowsFolder]System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[#InstallDriverScript]&quot; -PackageDirectory &quot;[DriverDir]&quot; -DriverToolPath &quot;[#DriverToolExecutable]&quot; -Transactional"
+        Execute="deferred"
+        Impersonate="no"
+        Return="check" />
+    <CustomAction
+        Id="CommitDriver"
+        Directory="DriverDir"
+        ExeCommand="&quot;[WindowsFolder]System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[#CompleteDriverInstallScript]&quot;"
+        Execute="commit"
+        Impersonate="no"
+        Return="ignore" />
+    <CustomAction
+        Id="UninstallDriver"
+        Directory="DriverDir"
+        ExeCommand="&quot;[WindowsFolder]System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[#UninstallDriverScript]&quot;"
+        Execute="deferred"
+        Impersonate="no"
+        Return="check" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RollbackDriver" After="InstallFiles" Condition="NOT Installed OR REINSTALL" />
+      <Custom Action="InstallDriver" After="RollbackDriver" Condition="NOT Installed OR REINSTALL" />
+      <Custom Action="CommitDriver" After="InstallDriver" Condition="NOT Installed OR REINSTALL" />
+      <Custom Action="UninstallDriver" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+    <?endif?>
+  </Package>
+</Wix>

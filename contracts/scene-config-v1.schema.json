@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sound-spatializer.local/schema/scene-config-v1.json",
+  "title": "SceneConfigV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "audio", "tracking", "listener", "speakers", "hrtf", "headphoneEq", "room"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outputDeviceId", "mode", "sampleRate", "bufferFrames", "bypass", "masterGainDb", "roomMix"],
+      "properties": {
+        "outputDeviceId": { "type": ["string", "null"] },
+        "captureProvider": {
+          "description": "Capture route. Missing means native-driver for backward compatibility.",
+          "enum": ["native-driver", "external-render"]
+        },
+        "captureEndpointId": {
+          "description": "Explicit WASAPI render endpoint ID for external-render; missing means null.",
+          "type": ["string", "null"]
+        },
+        "mode": {
+          "description": "Audio buffer/renderer mode. compatibility means a 256-frame target and is independent from captureProvider.",
+          "enum": ["shared-low-latency", "exclusive-pro", "compatibility"]
+        },
+        "sampleRate": { "const": 48000 },
+        "bufferFrames": { "enum": [64, 128, 256] },
+        "bypass": { "type": "boolean" },
+        "masterGainDb": { "type": "number", "minimum": -60, "maximum": 6 },
+        "roomMix": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["captureProvider"],
+            "properties": { "captureProvider": { "const": "external-render" } }
+          },
+          "then": {
+            "required": ["captureEndpointId", "outputDeviceId"],
+            "properties": {
+              "captureEndpointId": { "type": "string", "minLength": 1, "pattern": "\\S" },
+              "outputDeviceId": { "type": "string", "minLength": 1, "pattern": "\\S" }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["captureProvider"],
+            "properties": { "captureProvider": { "const": "native-driver" } }
+          },
+          "then": { "properties": { "captureEndpointId": { "type": "null" } } }
+        },
+        {
+          "if": {
+            "required": ["captureEndpointId"],
+            "properties": { "captureEndpointId": { "type": "string" } }
+          },
+          "then": {
+            "required": ["captureProvider"],
+            "properties": { "captureProvider": { "const": "external-render" } }
+          }
+        }
+      ]
+    },
+    "tracking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "cameraDeviceId", "minimumFps", "predictionLimitMs"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "cameraDeviceId": { "type": ["string", "null"] },
+        "minimumFps": { "type": "integer", "minimum": 30, "maximum": 240 },
+        "predictionLimitMs": { "type": "number", "minimum": 0, "maximum": 20 }
+      }
+    },
+    "listener": { "$ref": "#/$defs/listener" },
+    "speakers": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        { "$ref": "#/$defs/leftSpeaker" },
+        { "$ref": "#/$defs/rightSpeaker" }
+      ]
+    },
+    "hrtf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profileId", "sofaPath"],
+      "properties": {
+        "profileId": { "type": "string", "minLength": 1 },
+        "sofaPath": { "type": ["string", "null"] }
+      }
+    },
+    "headphoneEq": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "preampDb", "filters"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "preampDb": {
+          "description": "Safety preamplifier applied only while headphone EQ is enabled. The shipped default is -6 dB of headroom.",
+          "type": "number",
+          "minimum": -24,
+          "maximum": 0
+        },
+        "filters": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/biquad" }
+        }
+      }
+    },
+    "room": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "dimensionsM", "surfaces", "earlyReflectionOrder", "earlyReflectionLimitMs", "lateReverbEnabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "dimensionsM": {
+          "description": "Room extents [width X, height Y, depth Z] in metres. The floor is Y=0 and the room is centred on X/Z.",
+          "$ref": "#/$defs/vec3Positive"
+        },
+        "surfaces": {
+          "description": "Exactly six surfaces ordered [-X, +X, -Z, +Z, -Y floor, +Y ceiling].",
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": { "$ref": "#/$defs/surface" }
+        },
+        "earlyReflectionOrder": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "earlyReflectionLimitMs": { "type": "number", "minimum": 0, "maximum": 80 },
+        "lateReverbEnabled": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "vec3": {
+      "type": "array",
+      "description": "Right-handed Cartesian [X right, Y up, Z forward] in metres.",
+      "prefixItems": [{ "type": "number" }, { "type": "number" }, { "type": "number" }],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "vec3Positive": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number", "exclusiveMinimum": 0 },
+        { "type": "number", "exclusiveMinimum": 0 },
+        { "type": "number", "exclusiveMinimum": 0 }
+      ],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "quaternion": {
+      "type": "array",
+      "prefixItems": [{ "type": "number" }, { "type": "number" }, { "type": "number" }, { "type": "number" }],
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "listener": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["positionM", "neutralOrientation"],
+      "properties": {
+        "positionM": { "$ref": "#/$defs/vec3" },
+        "neutralOrientation": { "$ref": "#/$defs/quaternion" }
+      }
+    },
+    "speakerBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "positionM", "gainDb"],
+      "properties": {
+        "channel": { "enum": ["left", "right"] },
+        "positionM": { "$ref": "#/$defs/vec3" },
+        "gainDb": { "type": "number", "minimum": -60, "maximum": 12 }
+      }
+    },
+    "leftSpeaker": {
+      "allOf": [
+        { "$ref": "#/$defs/speakerBase" },
+        { "type": "object", "properties": { "channel": { "const": "left" } } }
+      ]
+    },
+    "rightSpeaker": {
+      "allOf": [
+        { "$ref": "#/$defs/speakerBase" },
+        { "type": "object", "properties": { "channel": { "const": "right" } } }
+      ]
+    },
+    "biquad": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "frequencyHz", "q", "gainDb"],
+      "properties": {
+        "type": { "enum": ["peaking", "low-shelf", "high-shelf", "low-pass", "high-pass"] },
+        "frequencyHz": { "type": "number", "minimum": 10, "maximum": 24000 },
+        "q": { "type": "number", "exclusiveMinimum": 0, "maximum": 30 },
+        "gainDb": { "type": "number", "minimum": -24, "maximum": 24 }
+      }
+    },
+    "surface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["materialId", "absorption", "diffusion"],
+      "properties": {
+        "materialId": { "type": "string", "minLength": 1 },
+        "absorption": {
+          "type": "array",
+          "prefixItems": [
+            { "type": "number", "minimum": 0, "maximum": 1 },
+            { "type": "number", "minimum": 0, "maximum": 1 },
+            { "type": "number", "minimum": 0, "maximum": 1 }
+          ],
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "diffusion": {
+          "description": "Low, mid and high-band diffuse-energy fractions.",
+          "type": "array",
+          "prefixItems": [
+            { "type": "number", "minimum": 0, "maximum": 1 },
+            { "type": "number", "minimum": 0, "maximum": 1 },
+            { "type": "number", "minimum": 0, "maximum": 1 }
+          ],
+          "minItems": 3,
+          "maxItems": 3
+        }
+      }
+    }
+  }
+}

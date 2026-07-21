@@ -1,0 +1,121 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <Platform>x64</Platform>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <Cultures>fr-FR</Cultures>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">0.1.0</ProductVersion>
+    <PackageMode Condition="'$(PackageMode)' == ''">Production</PackageMode>
+    <OutputPath Condition="'$(PackageMode)' == 'Production'">bin\$(Platform)\Production\</OutputPath>
+    <OutputPath Condition="'$(PackageMode)' == 'Preview'">bin\$(Platform)\Preview\</OutputPath>
+    <ProductName Condition="'$(PackageMode)' == 'Production'">Sound Spatializer</ProductName>
+    <ProductName Condition="'$(PackageMode)' == 'Preview'">Sound Spatializer Preview (sans pilote)</ProductName>
+    <ProductUpgradeCode Condition="'$(PackageMode)' == 'Production'">{D587A551-E59B-4DC4-9F25-F87F48B9007E}</ProductUpgradeCode>
+    <ProductUpgradeCode Condition="'$(PackageMode)' == 'Preview'">{12A2BF16-B16C-4C32-914E-CBA7A5C5D35B}</ProductUpgradeCode>
+    <InstallFolderName Condition="'$(PackageMode)' == 'Production'">Sound Spatializer</InstallFolderName>
+    <InstallFolderName Condition="'$(PackageMode)' == 'Preview'">Sound Spatializer Preview</InstallFolderName>
+    <ApplicationComponentGuid Condition="'$(PackageMode)' == 'Production'">{4FE17E2A-6410-47C9-9124-2D9CC41E08FD}</ApplicationComponentGuid>
+    <ApplicationComponentGuid Condition="'$(PackageMode)' == 'Preview'">{4EC7C582-28C4-47E3-8E89-29F345D71696}</ApplicationComponentGuid>
+    <EngineComponentGuid Condition="'$(PackageMode)' == 'Production'">{49900AC3-B2AC-45FB-A4EA-29504306F322}</EngineComponentGuid>
+    <EngineComponentGuid Condition="'$(PackageMode)' == 'Preview'">{B8B780E1-DC13-4430-8EE3-F3DBED1FD86B}</EngineComponentGuid>
+    <NoticesComponentGuid Condition="'$(PackageMode)' == 'Production'">{D826CD48-C9FC-4FF6-A023-FD4A83C4693C}</NoticesComponentGuid>
+    <NoticesComponentGuid Condition="'$(PackageMode)' == 'Preview'">{0058CD8A-AC45-44DF-B6F4-2830F5EB35F1}</NoticesComponentGuid>
+    <HrtfMetadataComponentGuid Condition="'$(PackageMode)' == 'Production'">{0F641129-7445-49C6-B6EC-C63CD56A6C5C}</HrtfMetadataComponentGuid>
+    <HrtfMetadataComponentGuid Condition="'$(PackageMode)' == 'Preview'">{5070B91F-57BB-47D8-80BD-77DD65AF729B}</HrtfMetadataComponentGuid>
+    <HrtfDataComponentGuid Condition="'$(PackageMode)' == 'Production'">{18295B4E-E371-4FA3-B0C4-F4A3037596D5}</HrtfDataComponentGuid>
+    <HrtfDataComponentGuid Condition="'$(PackageMode)' == 'Preview'">{852C9FC5-F887-42F5-B614-611CAC182578}</HrtfDataComponentGuid>
+    <OutputName Condition="'$(PackageMode)' == 'Production'">SoundSpatializer.Production.Installer</OutputName>
+    <OutputName Condition="'$(PackageMode)' == 'Preview'">SoundSpatializer.Preview.Installer</OutputName>
+    <DesktopExecutable Condition="'$(DesktopExecutable)' == ''">$(MSBuildThisFileDirectory)..\..\apps\desktop\src-tauri\target\release\sound-spatializer-desktop.exe</DesktopExecutable>
+    <EngineExecutable Condition="'$(EngineExecutable)' == ''">$(MSBuildThisFileDirectory)..\..\build\engine-mysofa\Release\SoundSpatializer.Engine.exe</EngineExecutable>
+    <DesktopResourcesDirectory Condition="'$(DesktopResourcesDirectory)' == ''">$(MSBuildThisFileDirectory)..\..\apps\desktop\src-tauri\resources</DesktopResourcesDirectory>
+    <RepositoryRoot Condition="'$(RepositoryRoot)' == ''">$(MSBuildThisFileDirectory)..\..</RepositoryRoot>
+    <DriverPackageDirectory Condition="'$(DriverPackageDirectory)' == ''">$(MSBuildThisFileDirectory)..\..\native\driver\artifacts\driver\x64\Release</DriverPackageDirectory>
+    <DriverScriptsDirectory Condition="'$(DriverScriptsDirectory)' == ''">$(MSBuildThisFileDirectory)..\..\native\driver\scripts</DriverScriptsDirectory>
+    <DriverToolExecutable Condition="'$(DriverToolExecutable)' == ''">$(MSBuildThisFileDirectory)..\..\native\driver\artifacts\tools\x64\Release\SoundSpatializer.DriverCtl.exe</DriverToolExecutable>
+    <HrtfPayloadValidationScript>$(MSBuildThisFileDirectory)Test-HrtfPayload.ps1</HrtfPayloadValidationScript>
+    <PackageFlavorValidationScript>$(MSBuildThisFileDirectory)Test-PackageFlavor.ps1</PackageFlavorValidationScript>
+    <DriverPayloadValidationScript>$(DriverScriptsDirectory)\Verify-DriverPackage.ps1</DriverPayloadValidationScript>
+    <DefineConstants>ProductVersion=$(ProductVersion);PackageMode=$(PackageMode);ProductName=$(ProductName);ProductUpgradeCode=$(ProductUpgradeCode);InstallFolderName=$(InstallFolderName);ApplicationComponentGuid=$(ApplicationComponentGuid);EngineComponentGuid=$(EngineComponentGuid);NoticesComponentGuid=$(NoticesComponentGuid);HrtfMetadataComponentGuid=$(HrtfMetadataComponentGuid);HrtfDataComponentGuid=$(HrtfDataComponentGuid);DesktopExecutable=$(DesktopExecutable);EngineExecutable=$(EngineExecutable);DesktopResourcesDirectory=$(DesktopResourcesDirectory);RepositoryRoot=$(RepositoryRoot);DriverPackageDirectory=$(DriverPackageDirectory);DriverScriptsDirectory=$(DriverScriptsDirectory);DriverToolExecutable=$(DriverToolExecutable)</DefineConstants>
+    <ApprovedWixToolsetVersion>5.0.2</ApprovedWixToolsetVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <RequiredApplicationPayload Include="$(DesktopExecutable)" />
+    <RequiredApplicationPayload Include="$(EngineExecutable)" />
+    <RequiredProductionPayload Include="$(DriverPackageDirectory)\SoundSpatializerAudio.inf" />
+    <RequiredProductionPayload Include="$(DriverPackageDirectory)\SoundSpatializerAudio.sys" />
+    <RequiredProductionPayload Include="$(DriverPackageDirectory)\SoundSpatializerAudio.cat" />
+    <RequiredProductionPayload Include="$(DriverToolExecutable)" />
+  </ItemGroup>
+  <Target Name="RemoveStaleSelectedInstallerOutput" BeforeTargets="GuardApprovedWixToolsetVersion;ValidatePackageMode;ValidateHrtfPayload;ValidateApplicationPayloads;ValidateProductionPayloads">
+    <Delete Files="$(MSBuildThisFileDirectory)bin\x64\Release\SoundSpatializer.Installer.msi;$(MSBuildThisFileDirectory)bin\x64\Release\SoundSpatializer.Installer.wixpdb;$(MSBuildThisFileDirectory)bin\x64\Release\SoundSpatializer.Preview.Installer.msi;$(MSBuildThisFileDirectory)bin\x64\Release\SoundSpatializer.Preview.Installer.wixpdb" />
+    <Delete Files="$(MSBuildThisFileDirectory)obj\x64\Release\SoundSpatializer.Installer.msi;$(MSBuildThisFileDirectory)obj\x64\Release\SoundSpatializer.Installer.wixpdb" />
+    <Delete Files="$(TargetPath);$(TargetDir)$(OutputName).wixpdb;$(MSBuildProjectDirectory)\$(IntermediateOutputPath)$(OutputName).msi;$(MSBuildProjectDirectory)\$(IntermediateOutputPath)$(OutputName).wixpdb" />
+  </Target>
+  <Target Name="ValidatePackageMode" BeforeTargets="CoreCompile">
+    <Error
+        Condition="'$(PackageMode)' != 'Production' and '$(PackageMode)' != 'Preview'"
+        Text="Unknown PackageMode '$(PackageMode)'. Allowed values are Production and Preview." />
+    <Error
+        Condition="'$(AllowPlaceholderPayloads)' != ''"
+        Text="AllowPlaceholderPayloads was removed because it produced an unsafe installable MSI. Use PackageMode=Preview for an application-only preview, or provide a real signed driver package for Production." />
+  </Target>
+  <Target Name="GuardApprovedWixToolsetVersion" BeforeTargets="CoreCompile">
+    <Error
+        Condition="'$(WixToolsetVersion)' != '$(ApprovedWixToolsetVersion)'"
+        Text="WiX $(WixToolsetVersion) is not approved. Keep 5.0.2 or complete an explicit license review before changing this project." />
+  </Target>
+  <Target Name="ValidateHrtfPayload" BeforeTargets="CoreCompile">
+    <Error
+        Condition="!Exists('$(HrtfPayloadValidationScript)')"
+        Text="HRTF payload validation script is missing: $(HrtfPayloadValidationScript)" />
+    <Exec
+        Command="powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(HrtfPayloadValidationScript)&quot; -ResourcesDirectory &quot;$(DesktopResourcesDirectory)&quot;" />
+  </Target>
+  <Target Name="ValidateApplicationPayloads" BeforeTargets="CoreCompile">
+    <Error
+        Condition="!Exists('%(RequiredApplicationPayload.Identity)')"
+        Text="Required application payload is missing: %(RequiredApplicationPayload.Identity)" />
+    <GetFileHash Files="@(RequiredApplicationPayload)" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="HashedApplicationPayload" />
+    </GetFileHash>
+    <Error
+        Condition="'%(HashedApplicationPayload.FileHash)' == 'E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855'"
+        Text="Refusing to package an empty application payload: %(HashedApplicationPayload.Identity)" />
+  </Target>
+  <Target Name="ValidateProductionPayloads" BeforeTargets="CoreCompile" Condition="'$(PackageMode)' == 'Production'">
+    <Error
+        Condition="!Exists('%(RequiredProductionPayload.Identity)')"
+        Text="Required production payload is missing: %(RequiredProductionPayload.Identity)" />
+    <GetFileHash Files="@(RequiredProductionPayload)" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="HashedProductionPayload" />
+    </GetFileHash>
+    <Error
+        Condition="'%(HashedProductionPayload.FileHash)' == 'E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855'"
+        Text="Refusing to package an empty production payload: %(HashedProductionPayload.Identity)" />
+    <Error
+        Condition="'%(HashedProductionPayload.FileHash)' == '92C935F513E028523C176A6F4BFBD5404D5A00F99FCFD2CC0C8F3124874B9C54'"
+        Text="Refusing to package the WiX smoke marker as a production payload: %(HashedProductionPayload.Identity)" />
+    <Error
+        Condition="!Exists('$(DriverPayloadValidationScript)')"
+        Text="Driver payload validation script is missing: $(DriverPayloadValidationScript)" />
+    <Exec
+        Command="powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(DriverPayloadValidationScript)&quot; -PackageDirectory &quot;$(DriverPackageDirectory)&quot;" />
+  </Target>
+  <Target Name="ValidateBuiltPackageFlavor" AfterTargets="Build">
+    <Error
+        Condition="!Exists('$(PackageFlavorValidationScript)')"
+        Text="MSI flavor validation script is missing: $(PackageFlavorValidationScript)" />
+    <Exec
+        Command="powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(PackageFlavorValidationScript)&quot; -MsiPath &quot;$(TargetPath)&quot; -ExpectedMode &quot;$(PackageMode)&quot;"
+        IgnoreExitCode="true">
+      <Output TaskParameter="ExitCode" PropertyName="PackageFlavorValidationExitCode" />
+    </Exec>
+    <Delete
+        Condition="'$(PackageFlavorValidationExitCode)' != '0'"
+        Files="$(TargetPath);$(TargetDir)$(OutputName).wixpdb;$(MSBuildProjectDirectory)\$(IntermediateOutputPath)$(OutputName).msi;$(MSBuildProjectDirectory)\$(IntermediateOutputPath)$(OutputName).wixpdb" />
+    <Error
+        Condition="'$(PackageFlavorValidationExitCode)' != '0'"
+        Text="MSI flavor validation failed for $(PackageMode); all selected output artifacts were removed." />
+  </Target>
+</Project>

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "mediapipe": {
+    "wasmRoot": "/mediapipe",
+    "wasmModule": "/mediapipe/vision_wasm_module_internal.wasm",
+    "model": "/models/face_landmarker.task"
+  },
+  "hrtf": {
+    "format": "SOFA",
+    "convention": "SimpleFreeFieldHRIR",
+    "directory": "/hrtf"
+  }
+}

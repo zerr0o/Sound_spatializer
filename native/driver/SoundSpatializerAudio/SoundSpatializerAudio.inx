@@ -1,0 +1,132 @@
+[Version]
+Signature   = "$Windows NT$"
+Class       = MEDIA
+ClassGUID   = {4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider    = %ProviderName%
+DriverVer   = 07/21/2026,0.1.0.0
+CatalogFile = SoundSpatializerAudio.cat
+PnpLockDown = 1
+
+[ControlFlags]
+ExcludeFromSelect = *
+
+[SourceDisksNames]
+222 = %DriverDiskName%,,,
+
+[SourceDisksFiles]
+SoundSpatializerAudio.sys = 222
+
+[DestinationDirs]
+SoundSpatializer.CopyFiles = 13
+
+[Manufacturer]
+%ManufacturerName% = SoundSpatializer,NTamd64.10.0...26100
+
+[SoundSpatializer.NTamd64.10.0...26100]
+%SoundSpatializer.DeviceDesc% = SoundSpatializer_Install, Root\SoundSpatializer_Audio
+
+[SoundSpatializer_Install.NT]
+Include   = ks.inf, wdmaudio.inf
+Needs     = KS.Registration, WDMAUDIO.Registration
+CopyFiles = SoundSpatializer.CopyFiles
+AddReg    = SoundSpatializer.Device.AddReg
+
+[SoundSpatializer.CopyFiles]
+SoundSpatializerAudio.sys
+
+[SoundSpatializer.Device.AddReg]
+HKR,,AssociatedFilters,,"wdmaud"
+HKR,,Driver,,SoundSpatializerAudio.sys
+HKR,Drivers,SubClasses,,"wave,mixer"
+HKR,Drivers\wave\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\mixer\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\wave\wdmaud.drv,Description,,%SoundSpatializer.DeviceDesc%
+HKR,Drivers\mixer\wdmaud.drv,Description,,%SoundSpatializer.DeviceDesc%
+
+[SoundSpatializer_Install.NT.Interfaces]
+AddInterface = %KSCATEGORY_AUDIO%,      %KSNAME_Wave%,     SoundSpatializer.Wave
+AddInterface = %KSCATEGORY_RENDER%,     %KSNAME_Wave%,     SoundSpatializer.Wave
+AddInterface = %KSCATEGORY_REALTIME%,   %KSNAME_Wave%,     SoundSpatializer.Wave
+AddInterface = %KSCATEGORY_AUDIO%,      %KSNAME_Topology%, SoundSpatializer.Topology
+AddInterface = %KSCATEGORY_TOPOLOGY%,   %KSNAME_Topology%, SoundSpatializer.Topology
+AddInterface = %SoundSpatializer.DeviceInterfaceGuid%, %SoundSpatializer.InterfaceRef%, SoundSpatializer.ContractInterface
+
+[SoundSpatializer.Wave]
+AddReg = SoundSpatializer.Wave.AddReg
+
+[SoundSpatializer.Wave.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%SoundSpatializer.EndpointName%
+
+[SoundSpatializer.Topology]
+AddReg = SoundSpatializer.Topology.AddReg
+
+[SoundSpatializer.Topology.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%SoundSpatializer.EndpointName%
+HKR,EP\0,%PKEY_AudioEndpoint_Association%,,%KSNODETYPE_ANY%
+HKR,EP\0,%PKEY_AudioEndpoint_Supports_EventDriven_Mode%,0x00010001,1
+HKR,EP\0,%PKEY_AudioEndpoint_FormFactor%,0x00010001,1
+HKR,EP\0,%PKEY_SoundSpatializer_EndpointMarker%,0x00010001,1
+HKR,EP\0,%PKEY_SoundSpatializer_ContractVersion%,0x00010001,1
+
+[SoundSpatializer.ContractInterface]
+AddReg = SoundSpatializer.ContractInterface.AddReg
+
+[SoundSpatializer.ContractInterface.AddReg]
+HKR,,ContractVersion,0x00010001,1
+HKR,,EndpointPropertySet,,%SoundSpatializer.EndpointPropertySetGuid%
+
+[SoundSpatializer_Install.NT.Services]
+AddService = SoundSpatializerAudio,0x00000002,SoundSpatializer_Service
+
+[SoundSpatializer_Service]
+DisplayName   = %SoundSpatializer.ServiceDesc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\SoundSpatializerAudio.sys
+
+[SoundSpatializer_Install.NT.HW]
+AddReg = SoundSpatializer.Hardware.AddReg
+
+[SoundSpatializer.Hardware.AddReg]
+; FILE_DEVICE_SOUND
+HKR,,DeviceType,0x00010001,0x0000001D
+; Same audio-device ACL used by the upstream SysVAD sample. The v1 contract
+; exposes no private IOCTL, and user-mode control remains on a SID-scoped pipe.
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;WD)(A;;GRGWGX;;;RC)"
+
+[SoundSpatializer_Install.NT.Wdf]
+KmdfService = SoundSpatializerAudio,SoundSpatializer_Wdf
+
+[SoundSpatializer_Wdf]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+; Non-localizable identifiers.
+Proxy.CLSID                              = "{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+KSCATEGORY_AUDIO                         = "{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSCATEGORY_RENDER                        = "{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_REALTIME                      = "{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
+KSCATEGORY_TOPOLOGY                      = "{DDA54A40-1E4C-11D1-A050-405705C10000}"
+KSNODETYPE_ANY                           = "{00000000-0000-0000-0000-000000000000}"
+KSNAME_Wave                              = "WaveSoundSpatializer"
+KSNAME_Topology                          = "TopologySoundSpatializer"
+SoundSpatializer.DeviceInterfaceGuid     = "{EF58434D-ADA7-47E2-A2C4-4E8C58BA3E0B}"
+SoundSpatializer.InterfaceRef            = "SoundSpatializerAudio"
+SoundSpatializer.EndpointPropertySetGuid = "{B01E7F02-85B0-4CF9-B53D-75DFD2B05E07}"
+PKEY_AudioEndpoint_Association               = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},2"
+PKEY_AudioEndpoint_Supports_EventDriven_Mode = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},7"
+PKEY_AudioEndpoint_FormFactor                = "{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E},0"
+PKEY_SoundSpatializer_EndpointMarker         = "{B01E7F02-85B0-4CF9-B53D-75DFD2B05E07},2"
+PKEY_SoundSpatializer_ContractVersion        = "{B01E7F02-85B0-4CF9-B53D-75DFD2B05E07},3"
+
+; Localizable strings (French catalog is the initial product language).
+ProviderName                   = "Sound Spatializer"
+ManufacturerName               = "Sound Spatializer"
+DriverDiskName                 = "Pilote audio Sound Spatializer"
+SoundSpatializer.DeviceDesc    = "Sound Spatializer"
+SoundSpatializer.EndpointName  = "Sound Spatializer"
+SoundSpatializer.ServiceDesc   = "Pilote audio virtuel Sound Spatializer"
+

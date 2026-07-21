@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "dataset": {
+    "name": "SADIE II",
+    "version": "2-2",
+    "record": "https://zenodo.org/records/12092466",
+    "license": "Apache-2.0",
+    "notice": "Copyright 2018 University of York. Measurements by Cal Armstrong, Lewis Thresh and Gavin Kearney."
+  },
+  "selection": {
+    "method": "PAM k-medoids after seeded k-medoids++ initialization",
+    "seed": 42,
+    "source": "SADIE II v2-2 public per-subject 3D OBJ scans",
+    "featureFile": "anthropometry-v2-2.csv",
+    "featureSha256": "e21e7606970c82a34bb8dfbad9bc57395e80de568cca3ee46b8a1d5dda77cac1",
+    "features": ["head_width_mm", "head_height_mm", "head_depth_mm"],
+    "medoids": ["H6", "H9", "H10", "H19", "H20"]
+  },
+  "profiles": [
+    {
+      "id": "sadie-d2-kemar",
+      "subject": "D2",
+      "kind": "dummy-head",
+      "label": "KEMAR — référence",
+      "archive": "D2_HRIR_SOFA.zip",
+      "archiveMd5": "f555491d1b6b1a108bb4d26b63ad84a4",
+      "archiveBytes": 38042020,
+      "source": "https://zenodo.org/api/records/12092466/files/D2_HRIR_SOFA.zip/content",
+      "member": "D2_HRIR_SOFA/D2_48K_24bit_256tap_FIR_SOFA.sofa",
+      "output": "sadie-d2-kemar.sofa",
+      "sofaBytes": 36310650,
+      "sofaSha256": "bb4f3d4126e686f438c4dcd8c11541e62393c0d90db1da6f17d1dd13d01c8ef7"
+    },
+    {
+      "id": "sadie-h6",
+      "subject": "H6",
+      "kind": "human",
+      "label": "Humain A",
+      "archive": "H6_HRIR_SOFA.zip",
+      "archiveMd5": "a74c25aea92193af5782925f7f15539b",
+      "archiveBytes": 12418922,
+      "source": "https://zenodo.org/api/records/12092466/files/H6_HRIR_SOFA.zip/content",
+      "member": "H6_HRIR_SOFA/H6_48K_24bit_256tap_FIR_SOFA.sofa",
+      "output": "sadie-h6.sofa",
+      "sofaBytes": 11654654,
+      "sofaSha256": "785738cb0285a224d898d3f1cf84a81aaf6843c6ddefcdde7dcaaf9b772f5f80"
+    },
+    {
+      "id": "sadie-h9",
+      "subject": "H9",
+      "kind": "human",
+      "label": "Humain B",
+      "archive": "H9_HRIR_SOFA.zip",
+      "archiveMd5": "1a02cb35604b3f4f75f54ae15b875b75",
+      "archiveBytes": 12486091,
+      "source": "https://zenodo.org/api/records/12092466/files/H9_HRIR_SOFA.zip/content",
+      "member": "H9_HRIR_SOFA/H9_48K_24bit_256tap_FIR_SOFA.sofa",
+      "output": "sadie-h9.sofa",
+      "sofaBytes": 11654654,
+      "sofaSha256": "751ff726d7e2da72257357ffc910f0bae1cc88ee588f4b436a39f8c4af650c1f"
+    },
+    {
+      "id": "sadie-h10",
+      "subject": "H10",
+      "kind": "human",
+      "label": "Humain C",
+      "archive": "H10_HRIR_SOFA.zip",
+      "archiveMd5": "501542240c1e2688a00a7f4267a11c5e",
+      "archiveBytes": 9591308,
+      "source": "https://zenodo.org/api/records/12092466/files/H10_HRIR_SOFA.zip/content",
+      "member": "H10_HRIR_SOFA/H10_48K_24bit_256tap_FIR_SOFA.sofa",
+      "output": "sadie-h10.sofa",
+      "sofaBytes": 8753949,
+      "sofaSha256": "b48cf93b1b3919fa61a787242c75763fad2a4b0ee3464e53e165ba12a9720fde"
+    },
+    {
+      "id": "sadie-h19",
+      "subject": "H19",
+      "kind": "human",
+      "label": "Humain D",
+      "archive": "H19_HRIR_SOFA.zip",
+      "archiveMd5": "49ebeb61f9cc8cfec30d87ef4880fd6f",
+      "archiveBytes": 9526072,
+      "source": "https://zenodo.org/api/records/12092466/files/H19_HRIR_SOFA.zip/content",
+      "member": "H19_HRIR_SOFA/H19_48K_24bit_256tap_FIR_SOFA.sofa",
+      "output": "sadie-h19.sofa",
+      "sofaBytes": 8753949,
+      "sofaSha256": "d28380500d40f428af702d90dbfdcef86328071796d45adf4a5822d88f49167c"
+    },
+    {
+      "id": "sadie-h20",
+      "subject": "H20",
+      "kind": "human",
+      "label": "Humain E",
+      "archive": "H20_HRIR_SOFA.zip",
+      "archiveMd5": "d838ecc8a8c97b2ad0157a5ca55c0e73",
+      "archiveBytes": 9299084,
+      "source": "https://zenodo.org/api/records/12092466/files/H20_HRIR_SOFA.zip/content",
+      "member": "H20_HRIR_SOFA/H20_48K_24bit_256tap_FIR_SOFA.sofa",
+      "output": "sadie-h20.sofa",
+      "sofaBytes": 8753949,
+      "sofaSha256": "0377272defbf45f1f098c2fc0256fc4a9aa022545033ac9c80ea661403f61181"
+    }
+  ]
+}

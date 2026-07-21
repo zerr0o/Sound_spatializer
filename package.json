@@ -1,0 +1,35 @@
+{
+  "name": "sound-spatializer-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.29.3",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm --dir apps/desktop dev",
+    "build": "pnpm build:engine && pnpm build:ui",
+    "build:frontend": "pnpm --dir apps/desktop build",
+    "build:ui": "pnpm --dir apps/desktop package",
+    "build:engine": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-engine.ps1 -Configuration Release",
+    "build:engine:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-engine.ps1 -Configuration Debug -WithoutMySofa",
+    "driver:check": "powershell -NoProfile -ExecutionPolicy Bypass -File native/driver/scripts/Test-DriverDevelopmentEnvironment.ps1",
+    "driver:build": "powershell -NoProfile -ExecutionPolicy Bypass -File native/driver/scripts/Build-Driver.ps1 -Configuration Debug",
+    "driver:build:test-signed": "powershell -NoProfile -ExecutionPolicy Bypass -File native/driver/scripts/Build-TestSignedDriver.ps1 -CreateTestCertificate",
+    "driver:install": "powershell -NoProfile -ExecutionPolicy Bypass -File native/driver/scripts/Install-DevelopmentDriver.ps1",
+    "driver:uninstall": "powershell -NoProfile -ExecutionPolicy Bypass -File native/driver/scripts/Uninstall-Driver.ps1 -RemoveTestCertificate",
+    "test": "pnpm test:ui && pnpm test:engine && pnpm test:driver && pnpm test:tools && pnpm test:contracts",
+    "test:ui": "pnpm --dir apps/desktop test",
+    "test:engine": "ctest --test-dir build/engine-mysofa -C Release --output-on-failure",
+    "test:driver": "powershell -NoProfile -ExecutionPolicy Bypass -File native/driver/scripts/Test-DriverTransport.ps1 -Configuration Release",
+    "test:tools": "python -m unittest discover -s tools/tests -v",
+    "test:desktop-artifact": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/Test-TauriArtifact.ps1",
+    "test:desktop-single-instance": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/Test-TauriSingleInstance.ps1",
+    "test:contracts": "ajv validate --spec=draft2020 -s contracts/scene-config-v1.schema.json -d contracts/examples/default-scene-v1.json",
+    "check": "pnpm --dir apps/desktop check"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0",
+    "ajv-cli": "5.0.0"
+  }
+}

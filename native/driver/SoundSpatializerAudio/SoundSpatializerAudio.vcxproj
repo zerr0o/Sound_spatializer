@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Keep the driver build reproducible without requiring a machine-wide WDK
+      installation.  This package contains the 26100 kernel headers, libraries,
+      build targets and tools and brings the matching Windows SDK transitively.
+    -->
+    <PackageReference Include="Microsoft.Windows.SDK.cpp.x64" Version="10.0.26100.6584" />
+    <PackageReference Include="Microsoft.Windows.WDK.x64" Version="10.0.26100.6584" />
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{7E7D9884-02EA-461A-B9EE-4BC78A24CAB9}</ProjectGuid>
+    <RootNamespace>SoundSpatializerAudio</RootNamespace>
+    <ProjectName>SoundSpatializerAudio</ProjectName>
+    <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
+    <SupportsPackaging>false</SupportsPackaging>
+    <RequiresPackageProject>true</RequiresPackageProject>
+    <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="Exists('$(MSBuildProjectDirectory)\packages.lock.json')">true</RestoreLockedMode>
+    <!-- WDK projects do not define a managed TargetFrameworkMoniker.  NuGet's
+         native restore writes this exact target in project.assets.json, so
+         make it explicit for ResolveNuGetPackageAssets during command-line
+         MSBuild as well as inside Visual Studio. -->
+    <NuGetTargetMoniker>native,Version=v0.0</NuGetTargetMoniker>
+    <VcpkgEnabled>false</VcpkgEnabled>
+    <VcpkgEnableManifest>false</VcpkgEnableManifest>
+    <SysvadRoot Condition="'$(SysvadRoot)' == ''">$(MSBuildThisFileDirectory)..\build\_deps\windows-driver-samples\audio\sysvad</SysvadRoot>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+    <DriverType>KMDF</DriverType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <ConfigurationType>Driver</ConfigurationType>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props"
+            Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')"
+            Label="LocalAppDataPlatform" />
+  </ImportGroup>
+
+  <PropertyGroup>
+    <TargetName>SoundSpatializerAudio</TargetName>
+    <OutDir>$(SolutionDir)artifacts\obj\$(Platform)\$(Configuration)\driver\</OutDir>
+    <IntDir>$(SolutionDir)artifacts\obj\$(Platform)\$(Configuration)\driver\intermediate\</IntDir>
+    <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <EnableInf2Cat>true</EnableInf2Cat>
+    <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
+    <SignMode>Off</SignMode>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <EnablePREfast>true</EnablePREfast>
+      <ExceptionHandling>false</ExceptionHandling>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\overlay;$(SysvadRoot)\EndpointsCommon;$(SysvadRoot);$(DDK_INC_PATH);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>SOUND_SPATIALIZER_KERNEL;SOUND_SPATIALIZER_DISABLE_SAVEDATA;_USE_WAVERT_;_USE_IPortClsRuntimePower;_NEW_DELETE_OPERATORS_;UNICODE;_UNICODE;PC_IMPLEMENTATION;DEBUG_LEVEL=DEBUGLVL_TERSE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(DDK_INC_PATH);$(SysvadRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;PC_IMPLEMENTATION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
+    <Link>
+      <AdditionalDependencies>$(DDK_LIB_PATH)\portcls.lib;$(DDK_LIB_PATH)\stdunk.lib;$(DDK_LIB_PATH)\libcntpr.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <DriverSign>
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+    </DriverSign>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <!-- The pinned sample is external code. Keep diagnostics enabled, but do
+         not promote warnings in that dependency to errors in our project. -->
+    <ClCompile Include="$(SysvadRoot)\adapter.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\basetopo.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\common.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\hw.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\kshelper.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\savedata.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\ToneGenerator.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\EndpointsCommon\AudioModuleHelper.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\EndpointsCommon\MiniportAudioEngineNode.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\EndpointsCommon\MiniportStreamAudioEngineNode.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\EndpointsCommon\mintopo.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\EndpointsCommon\minwavert.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\EndpointsCommon\minwavertstream.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\EndpointsCommon\NewDelete.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ClCompile Include="$(SysvadRoot)\EndpointsCommon\speakertopo.cpp"><TreatWarningAsError>false</TreatWarningAsError></ClCompile>
+    <ResourceCompile Include="SoundSpatializerAudio.rc" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="..\include\SoundSpatializerDriverContract.h" />
+    <ClInclude Include="..\overlay\SoundSpatializerRenderHistory.h" />
+    <ClInclude Include="..\overlay\minipairs.h" />
+    <ClInclude Include="..\overlay\soundspatializerwavtable.h" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Inf Exclude="@(Inx)" Include="SoundSpatializerAudio.inx" />
+    <FilesToPackage Include="$(TargetPath)" Condition="'$(ConfigurationType)' == 'Driver'" />
+  </ItemGroup>
+
+  <Target Name="ValidateSysvadDependency" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(SysvadRoot)\adapter.cpp')"
+           Text="Pinned SysVAD sources are missing at '$(SysvadRoot)'. Run native\driver\scripts\Prepare-Sysvad.ps1 first." />
+    <Error Condition="!Exists('$(SysvadRoot)\LICENSE') And !Exists('$(SysvadRoot)\..\..\LICENSE')"
+           Text="The SysVAD dependency is incomplete: its upstream LICENSE was not found." />
+  </Target>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>

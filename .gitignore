@@ -1,0 +1,54 @@
+# JavaScript / Tauri
+node_modules/
+.pnpm-store/
+dist/
+*.tsbuildinfo
+package-lock.json
+vcpkg_installed/
+
+# Rust
+target/
+
+# Native builds
+build/
+out/
+.vs/
+CMakeUserPresets.json
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+
+# Python tooling
+__pycache__/
+*.py[cod]
+
+# Driver / signing artifacts
+native/driver/artifacts/
+native/driver/**/obj/
+*.cer
+*.pfx
+*.pvk
+*.p12
+*.cat
+*.sys
+*.msi
+*.msix
+*.wixpdb
+native/driver/packages/
+resources/hrtf/data/*
+!resources/hrtf/data/.gitkeep
+apps/desktop/public/hrtf/data/*
+!apps/desktop/public/hrtf/data/.gitkeep
+
+# Runtime state and imported user data
+.sound-spatializer/
+logs/
+crash-dumps/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

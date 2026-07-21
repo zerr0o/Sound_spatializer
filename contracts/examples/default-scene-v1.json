@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "audio": {
+    "outputDeviceId": null,
+    "captureProvider": "native-driver",
+    "captureEndpointId": null,
+    "mode": "shared-low-latency",
+    "sampleRate": 48000,
+    "bufferFrames": 128,
+    "bypass": false,
+    "masterGainDb": -6,
+    "roomMix": 0.18
+  },
+  "tracking": {
+    "enabled": true,
+    "cameraDeviceId": null,
+    "minimumFps": 60,
+    "predictionLimitMs": 20
+  },
+  "listener": {
+    "positionM": [0, 1.2, 0],
+    "neutralOrientation": [1, 0, 0, 0]
+  },
+  "speakers": [
+    {
+      "channel": "left",
+      "positionM": [-1, 1.2, 1.732051],
+      "gainDb": 0
+    },
+    {
+      "channel": "right",
+      "positionM": [1, 1.2, 1.732051],
+      "gainDb": 0
+    }
+  ],
+  "hrtf": {
+    "profileId": "sadie-d2-kemar",
+    "sofaPath": null
+  },
+  "headphoneEq": {
+    "enabled": false,
+    "preampDb": -6,
+    "filters": []
+  },
+  "room": {
+    "enabled": false,
+    "dimensionsM": [5, 2.7, 4],
+    "surfaces": [
+      { "materialId": "painted-concrete", "absorption": [0.1, 0.06, 0.04], "diffusion": [0.05, 0.05, 0.05] },
+      { "materialId": "painted-concrete", "absorption": [0.1, 0.06, 0.04], "diffusion": [0.05, 0.05, 0.05] },
+      { "materialId": "painted-concrete", "absorption": [0.1, 0.06, 0.04], "diffusion": [0.05, 0.05, 0.05] },
+      { "materialId": "painted-concrete", "absorption": [0.1, 0.06, 0.04], "diffusion": [0.05, 0.05, 0.05] },
+      { "materialId": "carpet-on-concrete", "absorption": [0.02, 0.14, 0.6], "diffusion": [0.1, 0.1, 0.1] },
+      { "materialId": "acoustic-tile", "absorption": [0.45, 0.8, 0.9], "diffusion": [0.1, 0.1, 0.1] }
+    ],
+    "earlyReflectionOrder": 2,
+    "earlyReflectionLimitMs": 80,
+    "lateReverbEnabled": true
+  }
+}

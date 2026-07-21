@@ -1,0 +1,7 @@
+/gen/
+/target/
+/resources/engine/*.exe
+/resources/hrtf/NOTICE.md
+/resources/hrtf/profiles.json
+/resources/hrtf/data/*.sofa
+!/resources/hrtf/data/.gitkeep

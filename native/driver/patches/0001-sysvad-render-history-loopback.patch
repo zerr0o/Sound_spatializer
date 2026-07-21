@@ -1,0 +1,333 @@
+diff --git a/audio/sysvad/EndpointsCommon/minwavert.h b/audio/sysvad/EndpointsCommon/minwavert.h
+index 42cad965..78220211 100644
+--- a/audio/sysvad/EndpointsCommon/minwavert.h
++++ b/audio/sysvad/EndpointsCommon/minwavert.h
+@@ -21,6 +21,7 @@ Abstract:
+ #ifdef SYSVAD_USB_SIDEBAND
+ #include "usbhsmicwavtable.h"
+ #endif // SYSVAD_USB_SIDEBAND
++#include "SoundSpatializerRenderHistory.h"
+ 
+ //=============================================================================
+ // Referenced Forward
+@@ -168,6 +169,7 @@ private:
+     CONSTRICTOR_OPTION                  m_LoopbackProtection;
+ 
+     CKeywordDetector                    m_KeywordDetector;
++    SoundSpatializerRenderHistory       m_RenderHistory;
+ 
+     union {
+         PVOID                           m_DeviceContext;
+@@ -188,6 +190,36 @@ protected:
+ 
+ 
+ public:
++    _IRQL_requires_max_(DISPATCH_LEVEL)
++    VOID ResetRenderHistory()
++    {
++        m_RenderHistory.Reset();
++    }
++
++    _IRQL_requires_max_(DISPATCH_LEVEL)
++    VOID PublishRenderBytes(
++        _In_reads_bytes_(byteCount) const BYTE* source,
++        _In_ ULONG byteCount)
++    {
++        NT_ASSERT((byteCount % SoundSpatializerRenderHistory::BytesPerFrame) == 0);
++        m_RenderHistory.Write(source, byteCount);
++    }
++
++    _IRQL_requires_max_(DISPATCH_LEVEL)
++    ULONG ConsumeLoopbackBytes(
++        _Out_writes_bytes_(byteCount) BYTE* destination,
++        _In_ ULONG byteCount)
++    {
++        NT_ASSERT((byteCount % SoundSpatializerRenderHistory::BytesPerFrame) == 0);
++        return m_RenderHistory.Read(destination, byteCount);
++    }
++
++    _IRQL_requires_max_(DISPATCH_LEVEL)
++    SoundSpatializerRenderHistory::Diagnostics GetRenderHistoryDiagnostics() const
++    {
++        return m_RenderHistory.GetDiagnostics();
++    }
++
+     DECLARE_PROPERTYHANDLER(Get_SoundDetectorSupportedPatterns);
+     DECLARE_PROPERTYHANDLER(Set_SoundDetectorPatterns);
+     DECLARE_PROPERTYHANDLER(Get_SoundDetectorArmed);
+diff --git a/audio/sysvad/EndpointsCommon/minwavertstream.cpp b/audio/sysvad/EndpointsCommon/minwavertstream.cpp
+index adea0c82..cabba350 100644
+--- a/audio/sysvad/EndpointsCommon/minwavertstream.cpp
++++ b/audio/sysvad/EndpointsCommon/minwavertstream.cpp
+@@ -344,7 +344,7 @@ Return Value:
+         return ntStatus;
+     }
+ 
+-    if (m_bCapture)
++    if (m_bCapture && !m_pMiniport->IsLoopbackPin(Pin_))
+     {
+         ReadRegistrySettings();
+             DWORD toneFrequency = 0;
+@@ -414,23 +414,6 @@ Return Value:
+             return ntStatus;
+         }
+     }
+-    else if (!g_DoNotCreateDataFiles)
+-    {
+-        //
+-        // Create an output file for the render data.
+-        //
+-        DPF(D_TERSE, ("SaveData %p", &m_SaveData));
+-        ntStatus = m_SaveData.SetDataFormat(DataFormat_);
+-        if (NT_SUCCESS(ntStatus))
+-        {
+-            ntStatus = m_SaveData.Initialize(m_pMiniport->IsOffloadPin(Pin_));
+-        }
+-
+-        if (!NT_SUCCESS(ntStatus))
+-        {
+-            return ntStatus;
+-        }
+-    }
+ 
+     //
+     // Register this stream.
+@@ -551,19 +534,6 @@ NTSTATUS CMiniportWaveRTStream::AllocateBufferWithNotification
+ 
+     RequestedSize_ -= RequestedSize_ % (m_pWfExt->Format.nBlockAlign);
+     
+-    if (!m_bCapture && !g_DoNotCreateDataFiles)
+-    {
+-        NTSTATUS ntStatus;
+-
+-        // Sysvad uses following buffer to hold data before writing to a file.
+-        // Allocating larger buffer will reduce File I/O operations.
+-        ntStatus = m_SaveData.SetMaxWriteSize(RequestedSize_ * 4);
+-        if (!NT_SUCCESS(ntStatus))
+-        {
+-            return ntStatus;
+-        }
+-    }
+-
+     PHYSICAL_ADDRESS highAddress;
+     highAddress.HighPart = 0;
+     highAddress.LowPart = MAXULONG;
+@@ -1211,11 +1181,6 @@ NTSTATUS CMiniportWaveRTStream::SetState
+ 
+             KeReleaseSpinLock(&m_PositionSpinLock, oldIrql);
+ 
+-            // Wait until all work items are completed.
+-            if (!m_bCapture && !g_DoNotCreateDataFiles)
+-            {
+-                m_SaveData.WaitAllWorkItems();
+-            }
+             break;
+ 
+         case KSSTATE_ACQUIRE:
+@@ -1335,6 +1300,11 @@ NTSTATUS CMiniportWaveRTStream::SetState
+             }
+ #endif // defined(SYSVAD_BTH_BYPASS) || defined(SYSVAD_USB_SIDEBAND)
+ 
++            if (!m_bCapture && m_KsState != KSSTATE_RUN)
++            {
++                m_pMiniport->ResetRenderHistory();
++            }
++
+             // Start DMA
+             LARGE_INTEGER ullPerfCounterTemp;
+             if (m_pMiniport->IsKeywordDetectorPin(m_ulPin))
+@@ -1469,11 +1439,8 @@ VOID CMiniportWaveRTStream::UpdatePosition
+                                         0);
+         }
+ 
+-        if (!g_DoNotCreateDataFiles)
+-        {
+-            // Read from buffer and write to a file.
+-            ReadBytes(ByteDisplacement);
+-        }
++        // Publish the bytes actually consumed by the virtual render DMA.
++        ReadBytes(ByteDisplacement);
+     }
+     
+     // Increment the DMA position by the number of bytes displaced since the last
+@@ -1502,7 +1469,9 @@ VOID CMiniportWaveRTStream::WriteBytes
+ 
+ Routine Description:
+ 
+-This function writes the audio buffer using a sine wave generator
++This function fills loopback from the real virtual render history. The
++synthetic SysVAD tone is retained only for unrelated capture pins, none of
++which are exposed by Sound Spatializer.
+ Arguments:
+ 
+ ByteDisplacement - # of bytes to process.
+@@ -1516,7 +1485,14 @@ ByteDisplacement - # of bytes to process.
+     while (ByteDisplacement > 0)
+     {
+         ULONG runWrite = min(ByteDisplacement, m_ulDmaBufferSize - bufferOffset);
++        if (m_pMiniport->IsLoopbackPin(m_ulPin))
++        {
++            m_pMiniport->ConsumeLoopbackBytes(m_pDmaBuffer + bufferOffset, runWrite);
++        }
++        else
++        {
+             m_ToneGenerator.GenerateSine(m_pDmaBuffer + bufferOffset, runWrite);
++        }
+         bufferOffset = (bufferOffset + runWrite) % m_ulDmaBufferSize;
+         ByteDisplacement -= runWrite;
+     }
+@@ -1532,7 +1508,8 @@ VOID CMiniportWaveRTStream::ReadBytes
+ 
+ Routine Description:
+ 
+-This function reads the audio buffer and saves the data in a file.
++This function publishes the real render bytes to the bounded loopback
++history. File I/O from the SysVAD demonstration is deliberately disabled.
+ 
+ Arguments:
+ 
+@@ -1547,7 +1524,7 @@ ByteDisplacement - # of bytes to process.
+     while (ByteDisplacement > 0)
+     {
+         ULONG runWrite = min(ByteDisplacement, m_ulDmaBufferSize - bufferOffset);
+-        m_SaveData.WriteData(m_pDmaBuffer + bufferOffset, runWrite);
++        m_pMiniport->PublishRenderBytes(m_pDmaBuffer + bufferOffset, runWrite);
+         bufferOffset = (bufferOffset + runWrite) % m_ulDmaBufferSize;
+         ByteDisplacement -= runWrite;
+     }
+@@ -1601,11 +1578,9 @@ Return Value:
+         m_ulContentId = ulOldContentId;
+     }
+ 
+-    //
+-    // SYSVAD writes each stream seperately to disk. If the rights for this
+-    // stream indicates that the stream is CopyProtected, stop writing to disk.
+-    //
+-    m_SaveData.Disable(drmRights->CopyProtect);
++    // This derivative never persists render data; keep the interface contract
++    // but do not route DRM state through SysVAD's file-writer helper.
++    UNREFERENCED_PARAMETER(drmRights);
+ 
+     //
+     // From MSDN:
+diff --git a/audio/sysvad/EndpointsCommon/MiniportAudioEngineNode.cpp b/audio/sysvad/EndpointsCommon/MiniportAudioEngineNode.cpp
+index 8c3979f2..55619791 100644
+--- a/audio/sysvad/EndpointsCommon/MiniportAudioEngineNode.cpp
++++ b/audio/sysvad/EndpointsCommon/MiniportAudioEngineNode.cpp
+@@ -19,6 +19,28 @@ Abstract:
+ #include "IHVPrivatePropertySet.h"
+ #include "UnittestData.h"
+ 
++#if !defined(SYSVAD_BTH_BYPASS) && !defined(SYSVAD_USB_SIDEBAND)
++// EndpointsCommon normally builds with a sideband stack. Sound Spatializer is
++// render-only, so keep those unreachable branches type-correct without pulling
++// Bluetooth or USB transports into the kernel binary.
++class CUnsupportedSideband final
++{
++public:
++    bool IsVolumeSupported(eDeviceType) const noexcept { return false; }
++    PKSPROPERTY_DESCRIPTION GetVolumeSettings(eDeviceType, PULONG) const noexcept { return nullptr; }
++    NTSTATUS GetVolume(eDeviceType, UINT32, LONG*) const noexcept { return STATUS_NOT_SUPPORTED; }
++    NTSTATUS SetVolume(eDeviceType, UINT32, LONG) const noexcept { return STATUS_NOT_SUPPORTED; }
++    bool IsMuteSupported(eDeviceType) const noexcept { return false; }
++    PKSPROPERTY_DESCRIPTION GetMuteSettings(eDeviceType, PULONG) const noexcept { return nullptr; }
++    BOOL GetMute(eDeviceType, UINT32) const noexcept { return FALSE; }
++    NTSTATUS SetMute(eDeviceType, UINT32, BOOL) const noexcept { return STATUS_NOT_SUPPORTED; }
++};
++
++static CUnsupportedSideband g_UnsupportedSideband;
++#define IsSidebandDevice() false
++#define m_pSidebandDevice (&g_UnsupportedSideband)
++#endif
++
+ #define MINWAVERT_POOLTAG 'RWNM'
+ //=============================================================================
+ // IMiniportAudioEngineNode
+@@ -850,6 +872,11 @@ NTSTATUS CMiniportWaveRT::GetChannelVolume(_In_  UINT32 _uiChannel, _Out_ LONG *
+     ASSERT (_pVolume);
+     DPF_ENTER(("[CMiniportWaveRT::GetChannelVolume]"));
+ 
++    if (_uiChannel != ALL_CHANNELS_ID && _uiChannel >= m_DeviceMaxChannels)
++    {
++        return STATUS_INVALID_PARAMETER;
++    }
++
+     NTSTATUS status = STATUS_SUCCESS;
+ 
+     if (IsSidebandDevice() && m_pSidebandDevice->IsVolumeSupported(m_DeviceType))
+@@ -864,7 +891,6 @@ NTSTATUS CMiniportWaveRT::GetChannelVolume(_In_  UINT32 _uiChannel, _Out_ LONG *
+         }
+         else
+         {
+-            ASSERT(_uiChannel <= m_DeviceMaxChannels);
+             *_pVolume = m_plVolumeLevel[_uiChannel];
+         }
+     }
+@@ -877,6 +903,11 @@ NTSTATUS CMiniportWaveRT::SetChannelVolume(_In_  UINT32 _uiChannel, _In_  LONG _
+     PAGED_CODE ();
+     DPF_ENTER(("[CMiniportWaveRT::SetChannelVolume]"));
+ 
++    if (_uiChannel != ALL_CHANNELS_ID && _uiChannel >= m_DeviceMaxChannels)
++    {
++        return STATUS_INVALID_PARAMETER;
++    }
++
+     if (IsSidebandDevice() && m_pSidebandDevice->IsVolumeSupported(m_DeviceType))
+     {
+         return m_pSidebandDevice->SetVolume(m_DeviceType, _uiChannel, _Volume);
+@@ -900,7 +931,6 @@ NTSTATUS CMiniportWaveRT::SetChannelVolume(_In_  UINT32 _uiChannel, _In_  LONG _
+         }
+         else
+         {
+-            ASSERT(_uiChannel <= m_DeviceMaxChannels);
+             m_plVolumeLevel[_uiChannel] = lVolume;
+         }
+     }
+@@ -1052,6 +1082,11 @@ NTSTATUS CMiniportWaveRT::GetChannelMute(_In_  UINT32 _uiChannel, _Out_  BOOL *(
+     ASSERT (_pbMute);
+     DPF_ENTER(("[CMiniportWaveRT::GetChannelMute]"));
+ 
++    if (_uiChannel != ALL_CHANNELS_ID && _uiChannel >= m_DeviceMaxChannels)
++    {
++        return STATUS_INVALID_PARAMETER;
++    }
++
+     if (IsSidebandDevice() && m_pSidebandDevice->IsMuteSupported(m_DeviceType))
+     {
+         *_pbMute = m_pSidebandDevice->GetMute(m_DeviceType, _uiChannel);
+@@ -1064,7 +1099,6 @@ NTSTATUS CMiniportWaveRT::GetChannelMute(_In_  UINT32 _uiChannel, _Out_  BOOL *(
+         }
+         else
+         {
+-            ASSERT(_uiChannel <= m_DeviceMaxChannels);
+             *_pbMute = m_pbMuted[_uiChannel];
+         }
+     }
+@@ -1077,6 +1111,11 @@ NTSTATUS CMiniportWaveRT::SetChannelMute(_In_  UINT32 _uiChannel, _In_  BOOL _bM
+     PAGED_CODE ();
+     DPF_ENTER(("[CMiniportWaveRT::SetChannelMute]"));
+ 
++    if (_uiChannel != ALL_CHANNELS_ID && _uiChannel >= m_DeviceMaxChannels)
++    {
++        return STATUS_INVALID_PARAMETER;
++    }
++
+     if (IsSidebandDevice() && m_pSidebandDevice->IsMuteSupported(m_DeviceType))
+     {
+         return m_pSidebandDevice->SetMute(m_DeviceType, _uiChannel, _bMute);
+@@ -1092,7 +1131,6 @@ NTSTATUS CMiniportWaveRT::SetChannelMute(_In_  UINT32 _uiChannel, _In_  BOOL _bM
+     }
+     else
+     {
+-        ASSERT(_uiChannel <= m_DeviceMaxChannels);
+         m_pbMuted[_uiChannel] = _bMute;
+     }
+ 
+@@ -1150,6 +1188,7 @@ Return Value:
+     if (NT_SUCCESS(ntStatus))
+     {
+         m_LoopbackProtection = ulProtectionOption;
++        m_RenderHistory.SetMuted(ulProtectionOption == CONSTRICTOR_OPTION_MUTE);
+     }
+     else 
+     {

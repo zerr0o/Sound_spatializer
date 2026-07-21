@@ -1,0 +1,40 @@
+#include <windows.h>
+
+#define VER_FILEVERSION             0,1,0,0
+#define VER_FILEVERSION_STR         "0.1.0.0\0"
+#define VER_PRODUCTVERSION          0,1,0,0
+#define VER_PRODUCTVERSION_STR      "0.1.0\0"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION VER_FILEVERSION
+ PRODUCTVERSION VER_PRODUCTVERSION
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x3L
+ FILESUBTYPE 0x7L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040c04b0"
+        BEGIN
+            VALUE "CompanyName", "Sound Spatializer\0"
+            VALUE "FileDescription", "Sound Spatializer Virtual Audio Driver\0"
+            VALUE "FileVersion", VER_FILEVERSION_STR
+            VALUE "InternalName", "SoundSpatializerAudio.sys\0"
+            VALUE "LegalCopyright", "Copyright (c) 2026 Sound Spatializer contributors\0"
+            VALUE "OriginalFilename", "SoundSpatializerAudio.sys\0"
+            VALUE "ProductName", "Sound Spatializer\0"
+            VALUE "ProductVersion", VER_PRODUCTVERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x040c, 1200
+    END
+END
+
