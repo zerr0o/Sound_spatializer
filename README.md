@@ -33,6 +33,23 @@ import d’une mesure personnelle au format SOFA/AES69.
 
 ![Bibliothèque de profils HRTF SADIE II](docs/screenshots/hrtf-profiles.png)
 
+## Installation rapide
+
+1. Téléchargez et décompressez la
+   [dernière release portable de Sound Spatializer](https://github.com/zerr0o/Sound_spatializer/releases/latest).
+2. Téléchargez le pilote officiel
+   [VB-CABLE pour Windows](https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip)
+   depuis [VB-Audio](https://vb-audio.com/Cable/index.htm).
+3. Décompressez entièrement l’archive VB-CABLE, puis lancez
+   `VBCABLE_Setup_x64.exe` en tant qu’administrateur.
+4. Redémarrez Windows après l’installation.
+5. Choisissez `CABLE Input` comme sortie audio Windows. Dans l’assistant Sound
+   Spatializer, sélectionnez ce même endpoint comme source externe et votre
+   casque physique comme sortie.
+
+Laissez `sound-spatializer-desktop.exe`, `SoundSpatializer.Engine.exe` et le
+dossier `hrtf` côte à côte après avoir extrait la release.
+
 ## Organisation
 
 - `apps/desktop` — Tauri 2, React, TypeScript, Three.js et suivi MediaPipe hors UI.
