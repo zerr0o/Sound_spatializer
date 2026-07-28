@@ -1,5 +1,20 @@
 import { useMemo, useState } from 'react';
-import { Camera, Crosshair, Link2, Maximize2, Radio, Rotate3D, Ruler, ScanFace, Sparkles, Unlink2, Volume2 } from 'lucide-react';
+import {
+  AppWindow,
+  Camera,
+  Crosshair,
+  Link2,
+  Maximize2,
+  Monitor,
+  Radio,
+  Rotate3D,
+  Ruler,
+  ScanFace,
+  Sparkles,
+  Trash2,
+  Unlink2,
+  Volume2,
+} from 'lucide-react';
 import { SpatialScene } from '../components/scene/SpatialScene';
 import { RangeControl, SegmentedControl, Toggle } from '../components/ui/Controls';
 import { applyMaterialPreset, MATERIAL_PRESETS, ROOM_SURFACES, setSurfaceBand, type AcousticBand, type RoomSurfaceKey } from '../lib/room-acoustics';
@@ -9,21 +24,57 @@ import { supportsSurround5_1 } from '../lib/runtime-capabilities';
 import { isSpeakerRouted, pairedSpeakerChannel } from '../lib/speaker-layout';
 import { useAppStore } from '../store/app-store';
 import { useTrackingController } from '../tracking/TrackingProvider';
-import type { Channel, InputLayout, SpeakerConfig, SpeakerSet } from '../types/contracts';
+import type {
+  Channel,
+  DisplayRuntimeInfo,
+  InputLayout,
+  Quaternion,
+  SpatialInputMode,
+  SpeakerConfig,
+  SpeakerSet,
+  WindowAudioSourceInfo,
+  WindowSourceRule,
+  WindowSpatializationConfigV1,
+} from '../types/contracts';
 
 type InspectorMode = 'speakers' | 'room';
+type WindowInspectorMode = 'displays' | 'sources';
 type ReflectionOrderOption = '0' | '1' | '2';
+
+interface WindowSourceEntry {
+  key: string;
+  applicationId: string;
+  source: WindowAudioSourceInfo | null;
+  rule: WindowSourceRule | null;
+}
+
+const displayYawDegrees = (orientation: Quaternion) =>
+  Math.atan2(
+    2 * (orientation.w * orientation.y + orientation.x * orientation.z),
+    1 - 2 * (orientation.y * orientation.y + orientation.z * orientation.z),
+  ) * 180 / Math.PI;
+
+const displayOrientationFromYaw = (degrees: number): Quaternion => {
+  const halfAngle = degrees * Math.PI / 360;
+  return { x: 0, y: Math.sin(halfAngle), z: 0, w: Math.cos(halfAngle) };
+};
 
 export function ScenePage() {
   const scene = useAppStore((state) => state.scene);
+  const windowSpatialization = useAppStore((state) => state.windowSpatialization);
+  const engine = useAppStore((state) => state.engine);
   const tracking = useAppStore((state) => state.tracking);
   const patchScene = useAppStore((state) => state.patchScene);
+  const replaceWindowSpatialization = useAppStore((state) => state.replaceWindowSpatialization);
   const notify = useAppStore((state) => state.notify);
   const audioDevices = useAppStore((state) => state.audioDevices);
   const { start, calibrate, running } = useTrackingController();
   const [selected, setSelected] = useState<Channel>('L');
   const [linked, setLinked] = useState(true);
   const [mode, setMode] = useState<InspectorMode>('speakers');
+  const [windowMode, setWindowMode] = useState<WindowInspectorMode>('displays');
+  const [selectedDisplayId, setSelectedDisplayId] = useState<string | null>(null);
+  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [selectedSurface, setSelectedSurface] = useState<RoomSurfaceKey>('front');
   const speaker = scene.speakers.find((item) => item.id === selected) ?? scene.speakers[0];
   const geometry = useMemo(
@@ -36,6 +87,153 @@ export function ScenePage() {
     : null;
   const surroundUnavailable = scene.captureProvider !== 'external-render' || !supportsSurround5_1(externalCapture);
   const pairedChannel = pairedSpeakerChannel(selected);
+  const spatialInputMode: SpatialInputMode = windowSpatialization.enabled ? 'process-windows' : 'endpoint-mix';
+  const windowRenderingEffective = engine.spatialInputMode === 'process-windows';
+  const windowEndpointFallback = windowSpatialization.enabled
+    && engine.windowAudio.supported
+    && engine.windowAudio.running
+    && engine.windowAudio.sourceCount > 0
+    && !windowRenderingEffective;
+  const displays = engine.windowAudio.displays;
+  const windowSources = engine.windowAudio.windowSources;
+  const windowSourceEntries = useMemo<WindowSourceEntry[]>(() => {
+    const normalizeApplicationId = (value: string) => value.toLocaleLowerCase('en-US');
+    const runtimeApplicationIds = new Set(
+      windowSources.map((source) => normalizeApplicationId(source.applicationId)),
+    );
+    return [
+      ...windowSources.map((source) => ({
+        key: `source:${source.sourceId}`,
+        applicationId: source.applicationId,
+        source,
+        rule: windowSpatialization.sourceRules.find(
+          (item) => normalizeApplicationId(item.applicationId) ===
+            normalizeApplicationId(source.applicationId),
+        ) ?? null,
+      })),
+      ...windowSpatialization.sourceRules
+        .filter((rule) => !runtimeApplicationIds.has(
+          normalizeApplicationId(rule.applicationId),
+        ))
+        .map((rule) => ({
+          key: `rule:${rule.applicationId}`,
+          applicationId: rule.applicationId,
+          source: null,
+          rule,
+        })),
+    ];
+  }, [windowSources, windowSpatialization.sourceRules]);
+  const visualDisplays = displays.map((display) => {
+    const calibration = windowSpatialization.displayCalibrations.find((item) => item.displayId === display.displayId);
+    return calibration ? {
+      ...display,
+      center: calibration.center,
+      widthM: calibration.widthM,
+      heightM: calibration.heightM,
+      orientation: calibration.orientation,
+      calibrated: true,
+    } : display;
+  });
+  const selectedDisplay = displays.find((display) => display.displayId === selectedDisplayId) ?? displays[0] ?? null;
+  const selectedSourceEntry = windowSourceEntries.find((entry) => entry.key === selectedSourceId)
+    ?? windowSourceEntries[0]
+    ?? null;
+  const selectedSource = selectedSourceEntry?.source ?? null;
+
+  const applyWindowSpatialization = (patch: Partial<WindowSpatializationConfigV1>) => {
+    const next: WindowSpatializationConfigV1 = {
+      ...windowSpatialization,
+      ...patch,
+      maxSources: Math.max(1, Math.min(8, Math.round(patch.maxSources ?? windowSpatialization.maxSources))),
+      stereoSpread: Math.max(0, Math.min(1, patch.stereoSpread ?? windowSpatialization.stereoSpread)),
+    };
+    replaceWindowSpatialization(next);
+  };
+
+  const setSpatialInputMode = (nextMode: SpatialInputMode) => {
+    if (nextMode === 'process-windows' && scene.inputLayout !== 'stereo') {
+      notify({
+        tone: 'warning',
+        title: 'Mode fenêtres stéréo',
+        detail: 'Repassez le format d’entrée sur Stéréo avant d’activer la spatialisation par fenêtres.',
+      });
+      return;
+    }
+    applyWindowSpatialization({ enabled: nextMode === 'process-windows' });
+    if (nextMode === 'process-windows') setWindowMode('displays');
+  };
+
+  const displayCalibration = selectedDisplay
+    ? windowSpatialization.displayCalibrations.find((item) => item.displayId === selectedDisplay.displayId) ?? null
+    : null;
+
+  const ensureDisplayCalibration = (display: DisplayRuntimeInfo) => displayCalibration ?? {
+    displayId: display.displayId,
+    center: { ...display.center },
+    widthM: display.widthM,
+    heightM: display.heightM,
+    orientation: { ...display.orientation },
+  };
+
+  const updateDisplayCalibration = (
+    display: DisplayRuntimeInfo,
+    patch: Partial<ReturnType<typeof ensureDisplayCalibration>>,
+  ) => {
+    const calibration = { ...ensureDisplayCalibration(display), ...patch };
+    const displayCalibrations = windowSpatialization.displayCalibrations
+      .filter((item) => item.displayId !== display.displayId)
+      .concat(calibration);
+    applyWindowSpatialization({ displayCalibrations });
+  };
+
+  const sourceRule = selectedSourceEntry?.rule ?? null;
+
+  const updateSourceRule = (
+    applicationId: string,
+    source: WindowAudioSourceInfo | null,
+    patch: Partial<WindowSourceRule>,
+  ) => {
+    const existingRule = windowSpatialization.sourceRules.find(
+      (item) => item.applicationId.toLocaleLowerCase('en-US') ===
+        applicationId.toLocaleLowerCase('en-US'),
+    ) ?? null;
+    if (!existingRule && windowSpatialization.sourceRules.length >= 64) {
+      notify({
+        tone: 'warning',
+        title: 'Limite de règles atteinte',
+        detail: 'Supprimez une règle existante avant d’en ajouter une nouvelle (maximum 64 applications).',
+      });
+      return;
+    }
+    const current: WindowSourceRule = existingRule ?? {
+      applicationId,
+      enabled: true,
+      gainDb: source?.gainDb ?? 0,
+      stereoSpread: windowSpatialization.stereoSpread,
+      fallbackDisplayId: source?.displayId ?? null,
+    };
+    const rule: WindowSourceRule = {
+      ...current,
+      ...patch,
+      gainDb: Math.max(-60, Math.min(12, patch.gainDb ?? current.gainDb)),
+      stereoSpread: Math.max(0, Math.min(1, patch.stereoSpread ?? current.stereoSpread)),
+    };
+    applyWindowSpatialization({
+      sourceRules: windowSpatialization.sourceRules
+        .filter((item) => item.applicationId.toLocaleLowerCase('en-US') !==
+          applicationId.toLocaleLowerCase('en-US'))
+        .concat(rule),
+    });
+  };
+
+  const removeSourceRule = (applicationId: string) => {
+    const normalizedId = applicationId.toLocaleLowerCase('en-US');
+    applyWindowSpatialization({
+      sourceRules: windowSpatialization.sourceRules.filter(
+        (item) => item.applicationId.toLocaleLowerCase('en-US') !== normalizedId,
+      ),
+    });
+  };
 
   const updateSpeaker = (id: Channel, update: Partial<SpeakerConfig>) => {
     const speakers = scene.speakers.map((item) => (item.id === id ? { ...item, ...update } : item)) as SpeakerSet;
@@ -117,8 +315,17 @@ export function ScenePage() {
       <section className="scene-stage panel">
         <div className="scene-toolbar">
           <div className="scene-legend">
-            <span><i className="legend-left" /> Enceintes routées</span>
-            <span><i className="legend-unrouted" /> Non routées</span>
+            {spatialInputMode === 'endpoint-mix' ? (
+              <>
+                <span><i className="legend-left" /> Enceintes routées</span>
+                <span><i className="legend-unrouted" /> Non routées</span>
+              </>
+            ) : (
+              <>
+                <span><i className="legend-left" /> Canal gauche de la fenêtre</span>
+                <span><i className="legend-right" /> Canal droit de la fenêtre</span>
+              </>
+            )}
             <span><i className="legend-listener" /> Point d’écoute</span>
           </div>
           <button type="button" className="ghost-button compact" onClick={() => void toggleFullscreen()}><Maximize2 size={15} /> Plein écran</button>
@@ -130,6 +337,9 @@ export function ScenePage() {
             room={scene.room}
             pose={tracking.pose}
             inputLayout={scene.inputLayout}
+            spatialInputMode={spatialInputMode}
+            displays={visualDisplays}
+            windowSources={windowSources}
             selectedSpeaker={selected}
             onSelectSpeaker={setSelected}
           />
@@ -154,25 +364,41 @@ export function ScenePage() {
             </button>
             <span className="keyboard-hint">ESPACE · RECENTRER</span>
           </div>
-          <div className="room-mix-compact">
-            <Volume2 size={16} />
-            <span>Direct</span>
-            <input
-              aria-label="Balance son direct et pièce"
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={scene.directRoomMix}
-              style={{ '--range-fill': `${scene.directRoomMix * 100}%` } as React.CSSProperties}
-              onChange={(event) => patchScene({ directRoomMix: Number(event.target.value) })}
-            />
-            <span>Pièce</span>
-          </div>
+          {spatialInputMode === 'endpoint-mix' && (
+            <div className="room-mix-compact">
+              <Volume2 size={16} />
+              <span>Direct</span>
+              <input
+                aria-label="Balance son direct et pièce"
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={scene.directRoomMix}
+                style={{ '--range-fill': `${scene.directRoomMix * 100}%` } as React.CSSProperties}
+                onChange={(event) => patchScene({ directRoomMix: Number(event.target.value) })}
+              />
+              <span>Pièce</span>
+            </div>
+          )}
         </div>
       </section>
 
       <aside className="inspector panel">
+        <div className="spatial-input-mode">
+          <span className="eyebrow">ORIGINE DES SOURCES</span>
+          <SegmentedControl<SpatialInputMode>
+            ariaLabel="Mode de spatialisation"
+            value={spatialInputMode}
+            onChange={setSpatialInputMode}
+            options={[
+              { value: 'endpoint-mix', label: 'Enceintes', icon: <Radio size={15} /> },
+              { value: 'process-windows', label: 'Fenêtres', icon: <AppWindow size={15} /> },
+            ]}
+          />
+        </div>
+
+        {!windowSpatialization.enabled && (
         <SegmentedControl
           ariaLabel="Panneau de configuration de la scène"
           value={mode}
@@ -182,8 +408,20 @@ export function ScenePage() {
             { value: 'room', label: 'Pièce', icon: <Ruler size={15} /> },
           ]}
         />
+        )}
+        {windowSpatialization.enabled && (
+          <SegmentedControl<WindowInspectorMode>
+            ariaLabel="Panneau de spatialisation des fenêtres"
+            value={windowMode}
+            onChange={setWindowMode}
+            options={[
+              { value: 'displays', label: 'Écrans', icon: <Monitor size={15} /> },
+              { value: 'sources', label: 'Sources', icon: <AppWindow size={15} /> },
+            ]}
+          />
+        )}
 
-        {mode === 'speakers' ? (
+        {!windowSpatialization.enabled && (mode === 'speakers' ? (
           <>
             <div className="inspector-section">
               <div className="section-heading-row">
@@ -327,6 +565,306 @@ export function ScenePage() {
             </div>
             <div className="inspector-note subtle">
               <p><strong>Modèle perceptuel</strong> Cette vue fournit une auralisation plausible, pas une prédiction acoustique certifiable.</p>
+            </div>
+          </>
+        ))}
+
+        {windowSpatialization.enabled && (
+          <>
+            <div className="inspector-section window-spatialization-editor">
+              <div className="window-runtime-summary">
+                <span className={`runtime-dot ${engine.windowAudio.running ? 'is-live' : ''}`} />
+                <span>
+                  <small>CAPTURE PAR APPLICATION</small>
+                  <strong>
+                    {!engine.windowAudio.supported
+                      ? 'En attente du moteur compatible'
+                      : engine.windowAudio.running && engine.windowAudio.sourceCount > 0 && windowRenderingEffective
+                        ? `${engine.windowAudio.sourceCount} source${engine.windowAudio.sourceCount > 1 ? 's' : ''} active${engine.windowAudio.sourceCount > 1 ? 's' : ''}`
+                        : engine.windowAudio.running && engine.windowAudio.sourceCount > 0
+                          ? 'Mix global de sécurité'
+                        : engine.windowAudio.running
+                          ? 'En attente d’une application audio'
+                        : 'Prête à démarrer'}
+                  </strong>
+                </span>
+              </div>
+              {engine.windowAudio.lastError && (
+                <small className="control-warning" role="status">{engine.windowAudio.lastError}</small>
+              )}
+              {windowEndpointFallback && !engine.windowAudio.lastError && (
+                <small className="control-warning" role="status">
+                  Séparation incomplète ou en cours : le mix global reste audible afin de ne couper aucune source.
+                </small>
+              )}
+              <Toggle
+                checked={windowSpatialization.followWindowPosition}
+                onChange={(followWindowPosition) => applyWindowSpatialization({ followWindowPosition })}
+                label="Suivre les déplacements"
+                description="La paire stéréo suit le centre et la largeur de chaque fenêtre."
+              />
+              <RangeControl
+                label="Sources simultanées"
+                value={windowSpatialization.maxSources}
+                min={1}
+                max={8}
+                step={1}
+                unit=""
+                onChange={(maxSources) => applyWindowSpatialization({ maxSources })}
+              />
+              <RangeControl
+                label="Largeur stéréo par défaut"
+                value={windowSpatialization.stereoSpread}
+                min={0}
+                max={1}
+                step={0.05}
+                unit=""
+                onChange={(stereoSpread) => applyWindowSpatialization({ stereoSpread })}
+                hint="0 centre les deux canaux ; 1 les place sur les bords de la fenêtre."
+              />
+
+              {windowMode === 'displays' ? (
+                <>
+                  <div className="section-heading-row window-section-heading">
+                    <div>
+                      <span className="eyebrow">AGENCEMENT WINDOWS</span>
+                      <h2>Écrans physiques</h2>
+                    </div>
+                    <span className="window-count">{displays.length}</span>
+                  </div>
+                  {displays.length === 0 ? (
+                    <div className="window-empty-state">
+                      <Monitor size={22} />
+                      <strong>Aucun écran reçu</strong>
+                      <small>Le moteur publiera ici l’agencement retourné par Windows.</small>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="display-selector" aria-label="Écran à calibrer">
+                        {displays.map((display) => (
+                          <button
+                            key={display.displayId}
+                            type="button"
+                            className={selectedDisplay?.displayId === display.displayId ? 'is-selected' : ''}
+                            onClick={() => setSelectedDisplayId(display.displayId)}
+                          >
+                            <Monitor size={14} />
+                            <span>
+                              <strong>{display.name}</strong>
+                              <small>
+                                {display.boundsPx.width}×{display.boundsPx.height}
+                                {display.isPrimary ? ' · Principal' : ''}
+                              </small>
+                            </span>
+                            <i>{display.calibrated || windowSpatialization.displayCalibrations.some((item) => item.displayId === display.displayId) ? 'CAL' : 'AUTO'}</i>
+                          </button>
+                        ))}
+                      </div>
+                      {selectedDisplay && (
+                        <div className="display-calibration">
+                          <span>
+                            <small>PLAN PHYSIQUE</small>
+                            <button
+                              type="button"
+                              className="text-link"
+                              onClick={() => applyWindowSpatialization({
+                                displayCalibrations: windowSpatialization.displayCalibrations
+                                  .filter((item) => item.displayId !== selectedDisplay.displayId),
+                              })}
+                            >
+                              Réinitialiser
+                            </button>
+                          </span>
+                          <RangeControl
+                            label="Décalage horizontal"
+                            value={(displayCalibration ?? selectedDisplay).center.x}
+                            min={-5}
+                            max={5}
+                            step={0.02}
+                            unit="m"
+                            onChange={(x) => updateDisplayCalibration(selectedDisplay, {
+                              center: { ...ensureDisplayCalibration(selectedDisplay).center, x },
+                            })}
+                          />
+                          <RangeControl
+                            label="Hauteur du centre"
+                            value={(displayCalibration ?? selectedDisplay).center.y}
+                            min={0.3}
+                            max={3}
+                            step={0.02}
+                            unit="m"
+                            onChange={(y) => updateDisplayCalibration(selectedDisplay, {
+                              center: { ...ensureDisplayCalibration(selectedDisplay).center, y },
+                            })}
+                          />
+                          <RangeControl
+                            label="Distance"
+                            value={(displayCalibration ?? selectedDisplay).center.z}
+                            min={0.4}
+                            max={5}
+                            step={0.02}
+                            unit="m"
+                            onChange={(z) => updateDisplayCalibration(selectedDisplay, {
+                              center: { ...ensureDisplayCalibration(selectedDisplay).center, z },
+                            })}
+                          />
+                          <RangeControl
+                            label="Angle horizontal"
+                            value={displayYawDegrees(
+                              (displayCalibration ?? selectedDisplay).orientation,
+                            )}
+                            min={-90}
+                            max={90}
+                            step={1}
+                            unit="°"
+                            onChange={(yaw) => updateDisplayCalibration(selectedDisplay, {
+                              orientation: displayOrientationFromYaw(yaw),
+                            })}
+                          />
+                          <RangeControl
+                            label="Largeur physique"
+                            value={(displayCalibration ?? selectedDisplay).widthM}
+                            min={0.2}
+                            max={3}
+                            step={0.01}
+                            unit="m"
+                            onChange={(widthM) => updateDisplayCalibration(selectedDisplay, { widthM })}
+                          />
+                          <RangeControl
+                            label="Hauteur physique"
+                            value={(displayCalibration ?? selectedDisplay).heightM}
+                            min={0.15}
+                            max={2}
+                            step={0.01}
+                            unit="m"
+                            onChange={(heightM) => updateDisplayCalibration(selectedDisplay, { heightM })}
+                          />
+                        </div>
+                      )}
+                    </>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="section-heading-row window-section-heading">
+                    <div>
+                      <span className="eyebrow">SESSIONS / PROCESSUS STÉRÉO</span>
+                      <h2>Sources audio</h2>
+                    </div>
+                    <span className="window-count">{windowSources.length}/{windowSpatialization.maxSources}</span>
+                  </div>
+                  {windowSourceEntries.length === 0 ? (
+                    <div className="window-empty-state">
+                      <AppWindow size={22} />
+                      <strong>Aucune source audio</strong>
+                      <small>Lancez un son dans une application visible pour créer sa paire L/R.</small>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="window-source-selector" aria-label="Source audio à configurer">
+                        {windowSourceEntries.map((entry) => (
+                          <button
+                            key={entry.key}
+                            type="button"
+                            className={selectedSourceEntry?.key === entry.key ? 'is-selected' : ''}
+                            onClick={() => setSelectedSourceId(entry.key)}
+                          >
+                            <span className={`runtime-dot ${entry.source?.active ? 'is-live' : ''}`} />
+                            <span>
+                              <strong>
+                                {entry.source?.applicationName
+                                  || entry.applicationId
+                                  || (entry.source ? `PID ${entry.source.processId}` : 'Application mémorisée')}
+                              </strong>
+                              <small>
+                                {entry.source
+                                  ? `${entry.source.windowTitle || 'Fenêtre principale'} · L/R`
+                                  : entry.rule?.enabled
+                                    ? 'Hors ligne · règle mémorisée'
+                                    : 'Désactivée · règle mémorisée'}
+                              </small>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                      {selectedSourceEntry && (
+                        <div className="source-rule-editor">
+                          <Toggle
+                            checked={sourceRule?.enabled ?? true}
+                            onChange={(enabled) => updateSourceRule(
+                              selectedSourceEntry.applicationId,
+                              selectedSource,
+                              { enabled },
+                            )}
+                            label="Spatialiser cette session audio"
+                            description={selectedSource
+                              ? `Arbre de processus · PID ${selectedSource.processId}`
+                              : selectedSourceEntry.applicationId}
+                          />
+                          <RangeControl
+                            label="Gain"
+                            value={sourceRule?.gainDb ?? selectedSource?.gainDb ?? 0}
+                            min={-60}
+                            max={12}
+                            step={0.5}
+                            unit="dB"
+                            onChange={(gainDb) => updateSourceRule(
+                              selectedSourceEntry.applicationId,
+                              selectedSource,
+                              { gainDb },
+                            )}
+                          />
+                          <RangeControl
+                            label="Écartement L/R"
+                            value={sourceRule?.stereoSpread ?? windowSpatialization.stereoSpread}
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            unit=""
+                            onChange={(stereoSpread) => updateSourceRule(
+                              selectedSourceEntry.applicationId,
+                              selectedSource,
+                              { stereoSpread },
+                            )}
+                          />
+                          <label className="material-select">
+                            <span>Écran de repli</span>
+                            <select
+                              value={sourceRule?.fallbackDisplayId ?? selectedSource?.displayId ?? ''}
+                              onChange={(event) => updateSourceRule(
+                                selectedSourceEntry.applicationId,
+                                selectedSource,
+                                { fallbackDisplayId: event.target.value || null },
+                              )}
+                            >
+                              <option value="">Placement frontal automatique</option>
+                              {displays.map((display) => (
+                                <option key={display.displayId} value={display.displayId}>{display.name}</option>
+                              ))}
+                            </select>
+                          </label>
+                          {sourceRule && (
+                            <div className="source-rule-actions">
+                              <button
+                                type="button"
+                                className="text-link danger-link"
+                                onClick={() => removeSourceRule(selectedSourceEntry.applicationId)}
+                              >
+                                <Trash2 size={13} />
+                                Supprimer la règle
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="inspector-note">
+              <Sparkles size={16} />
+              <p><strong>Stéréo conservée</strong> Chaque session et son arbre de processus utilisent deux émetteurs HRTF, placés sur la largeur de la fenêtre associée.</p>
             </div>
           </>
         )}

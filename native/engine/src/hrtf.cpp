@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace sound_spatializer {
 
@@ -63,16 +64,27 @@ HrtfLoadResult load_sofa_hrtf(std::string_view path, std::uint32_t sample_rate) 
 }
 
 bool build_binaural_filter_bank(const IHrtfDatabase& database,
-                                const std::array<Vec3f, kDirectionalSourceCount>& head_relative_directions,
-                                const std::array<float, kDirectionalSourceCount>& speaker_gains,
+                                const std::array<Vec3f, kMaximumBinauralSources>& head_relative_directions,
+                                const std::array<float, kMaximumBinauralSources>& speaker_gains,
                                 std::size_t source_count,
                                 HrirFilterBank& output) noexcept {
-    if (source_count == 0 || source_count > kDirectionalSourceCount) return false;
+    if (source_count == 0 || source_count > kMaximumBinauralSources ||
+        output.coefficients.size() != kMaximumBinauralSources * 2) {
+        return false;
+    }
     output.tap_count = 0;
     output.source_count = source_count;
     for (auto& path : output.coefficients) path.fill(0.0F);
-    std::size_t maximum_taps = 0;
+    // A bank containing only muted paths is still a valid silent bank.
+    std::size_t maximum_taps = 1;
     for (std::size_t source = 0; source < source_count; ++source) {
+        // Window-aware rendering deliberately keeps stable, sparse slot
+        // indices. A missing slot has zero gain and no meaningful direction;
+        // querying it can make strict providers reject the entire bank.
+        if (std::abs(speaker_gains[source]) <=
+            std::numeric_limits<float>::epsilon()) {
+            continue;
+        }
         std::size_t taps = 0;
         if (!database.query(head_relative_directions[source], output.path(source, 0),
                             output.path(source, 1), taps) ||

@@ -82,6 +82,58 @@ une matrice reproductible de plusieurs pilotes et versions; sinon la liste de
 support doit nommer exactement les produits qualifiés. Le programme de test
 n'installe et ne redistribue aucun composant tiers.
 
+## Sessions multiples et process-loopback
+
+Le mode Fenêtres doit être validé comme une banque de sessions/arborescences de
+processus, et non comme une correspondance supposée un-pour-un entre application,
+fenêtre et flux audio. Les tests automatisés et les essais Windows couvrent :
+
+- l'isolation impulsionnelle des canaux L/R de chaque capture, la duplication
+  explicite d'une source mono et l'absence de contamination entre deux arbres de
+  processus simultanés ;
+- la déduplication de plusieurs sessions d'un même PID et d'un processus enfant
+  déjà inclus par la capture de son parent, notamment avec navigateurs,
+  lecteurs multiprocessus et deux instances d'un même exécutable ;
+- le pré-armement d'une session inactive : le mix endpoint reste seul audible
+  jusqu'à ce que la session soit active et qu'un PCM non silencieux soit reçu ;
+  le passage au rendu process-loopback puis le retour au repli ne créent ni
+  silence, ni doublage, ni clic. Un PCM capturé pendant que la session de
+  l'endpoint source est inactive ne doit jamais l'activer : il est drainé et
+  ignoré afin qu'une application reroutée vers le casque ne soit pas rendue une
+  seconde fois ;
+- la priorité d'une session active sur un slot inactif, la limite explicite de
+  huit captures, et la stabilité des paires HRTF lorsqu'une capture intermédiaire
+  disparaît ou redémarre ;
+- le repli tout-ou-rien : son système actif, PID non ciblable, règle désactivée,
+  neuvième racine active, capture non prête ou échec d'énumération doivent
+  conserver le mix endpoint complet. Les autres FIFO continuent d'être vidées,
+  mais aucun sous-ensemble process ne devient audible ;
+- la sélection de la plus grande fenêtre visible d'une arborescence, les
+  fenêtres déplacées, réduites ou recréées, les coordonnées d'écran négatives,
+  les DPI mixtes, rotations, hotplug moniteur et calibrations persistées ;
+- le déplacement à chaud d'une fenêtre entre écrans sans recréer sa capture et
+  sans permutation L/R, ainsi que le repli déterministe sur l'écran configuré
+  lorsqu'aucune fenêtre n'est exploitable ;
+- le reroutage d'une session hors de l'endpoint source, sa réapparition, le
+  redémarrage du service audio et le maintien de la protection contre tout rendu
+  simultané endpoint/process-loopback ;
+- les compteurs distincts d'overrun et d'underrun des FIFO de capture, une dérive
+  injectée de ±1000 ppm, un soak de 24 h et une charge de huit captures stéréo
+  (seize sources applicatives HRTF plus la paire endpoint dormante), avec
+  callback p99 sous 50 % de sa période et zéro interruption.
+
+Le banc mesure aussi le délai d'activation d'un son court depuis l'état inactif.
+Sur une session préarmée, le premier PCM non silencieux doit révoquer
+atomiquement la couverture, rétablir le mix endpoint sans attendre un nouveau
+poll et ne jamais rendre ce PCM process tant que l'endpoint source ne l'a pas
+déclaré actif. Si la session reste inactive, le veto n'est relâché qu'après
+150 ms sans nouvelle révocation. Pour un processus réellement nouveau sans
+slot préarmé, le poll est réglé à 10 ms : il
+faut mesurer séparément l'attaque résiduelle d'au plus un intervalle, la
+transition vers la première paire L/R et la latence mouvement→casque. Une
+garantie exacte à l'échantillon exige encore les notifications de session
+Windows ; des timestamps logiciels seuls ne qualifient aucun de ces résultats.
+
 ## Écoute
 
 Le protocole en aveugle compare pose statique/dynamique et plusieurs HRTF. Les
@@ -100,7 +152,12 @@ Limites d'implémentation encore ouvertes dans cette révision :
 - le rendu L/R direct conserve 512 taps temporels sans latence et traite la
   queue par partitions de 128 frames jusqu'à 4 096 taps ; les SOFA plus longs
   sont rejetés. Cette borne et le coût maximal doivent encore être qualifiés
-  sur le matériel de référence ;
+  sur le matériel de référence. L'interpolation des HRIR est exécutée par le
+  worker, mais la construction des spectres partitionnés et le recalcul du
+  cache de transition sont encore déclenchés par `set_filters()` dans le
+  callback. Leur déplacement sûr hors temps réel, avec préchauffage de la queue
+  partitionnée, reste une porte avant qualification des HRTF de plus de
+  512 taps ;
 - le décodeur de pièce utilise bien des FIR HRTF 16×2 préalloués, mais son pire
   cas à 512 taps, la troncature documentée de la queue HRTF pour le seul champ
   réfléchi et la copie/application des banques préparées doivent être qualifiés

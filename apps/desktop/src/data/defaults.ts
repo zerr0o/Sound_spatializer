@@ -4,6 +4,7 @@ import type {
   SceneConfigV2,
   SurfaceAcoustics,
   TrackingMetrics,
+  WindowSpatializationConfigV1,
 } from '../types/contracts';
 
 const material = (
@@ -104,11 +105,24 @@ export const defaultPreferences: AppPreferences = {
   showCameraPreview: false,
 };
 
+export const defaultWindowSpatialization: WindowSpatializationConfigV1 = {
+  version: 1,
+  enabled: false,
+  maxSources: 8,
+  stereoSpread: 0.72,
+  followWindowPosition: true,
+  displayCalibrations: [],
+  sourceRules: [],
+};
+
 export const emptyEngineStatus: EngineStatusV1 = {
   version: 1,
+  connectionGeneration: 0,
   audioMode: 'shared-low-latency',
   renderSampleFormat: 'unknown',
   inputLayout: 'stereo',
+  spatialInputMode: 'endpoint-mix',
+  requestedSpatialInputMode: 'endpoint-mix',
   captureChannels: 2,
   captureChannelMask: 0x3,
   connection: 'offline',
@@ -131,6 +145,16 @@ export const emptyEngineStatus: EngineStatusV1 = {
   clockDriftPpm: 0,
   uptimeSeconds: 0,
   potentiallyBinaural: false,
+  windowAudio: {
+    supported: false,
+    running: false,
+    sourceCount: 0,
+    fifoOverruns: 0,
+    fifoUnderruns: 0,
+    displays: [],
+    windowSources: [],
+    lastError: null,
+  },
   lastError: null,
 };
 

@@ -348,9 +348,43 @@ void NamedPipeServer::Implementation::worker(std::stop_token stop_token) {
             }
             std::string json(prefix, '\0');
             if (!read_exact(pipe, json.data(), json.size(), stop_token)) break;
+            const ParseResult<std::uint32_t> command_id =
+                engine_command_id_from_json(json);
             ParseResult<EngineCommandV1> command = engine_command_from_json(json);
-            if (command) handler_.on_engine_command(*command.value);
-            else handler_.on_ipc_error(command.error);
+            if (!command) {
+                handler_.on_ipc_error(command.error);
+                if (command_id && *command_id.value != 0U) {
+                    const std::vector<std::byte> result_frame =
+                        encode_json_frame(engine_command_result_to_json(
+                            *command_id.value, false, false, command.error));
+                    if (result_frame.empty()) {
+                        handler_.on_ipc_error(
+                            "command rejection JSON is too large");
+                        continue;
+                    }
+                    std::scoped_lock lock(write_mutex_);
+                    if (!write_exact(pipe, result_frame.data(),
+                                     result_frame.size()))
+                        break;
+                }
+                continue;
+            }
+
+            const IpcMessageHandler::CommandResult command_result =
+                handler_.on_engine_command(*command.value);
+            // Legacy desktop builds omit commandId and expect every JSON frame
+            // to be an EngineStatusV1. Keep their one-way command semantics.
+            if (command.value->command_id == 0U) continue;
+            const std::vector<std::byte> result_frame = encode_json_frame(
+                engine_command_result_to_json(
+                    command.value->command_id, command_result.accepted,
+                    command_result.persisted, command_result.error));
+            if (result_frame.empty()) {
+                handler_.on_ipc_error("command result JSON is too large");
+                continue;
+            }
+            std::scoped_lock lock(write_mutex_);
+            if (!write_exact(pipe, result_frame.data(), result_frame.size())) break;
         }
         DisconnectNamedPipe(pipe);
         pipe_.store(INVALID_HANDLE_VALUE, std::memory_order_release);

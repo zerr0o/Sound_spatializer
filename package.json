@@ -12,6 +12,7 @@
     "build:frontend": "pnpm --dir apps/desktop build",
     "build:ui": "pnpm --dir apps/desktop package",
     "build:engine": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-engine.ps1 -Configuration Release",
+    "build:engine:debug": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-engine.ps1 -Configuration Debug",
     "build:engine:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-engine.ps1 -Configuration Debug -WithoutMySofa",
     "driver:check": "powershell -NoProfile -ExecutionPolicy Bypass -File native/driver/scripts/Test-DriverDevelopmentEnvironment.ps1",
     "driver:build": "powershell -NoProfile -ExecutionPolicy Bypass -File native/driver/scripts/Build-Driver.ps1 -Configuration Debug",
@@ -25,7 +26,7 @@
     "test:tools": "python -m unittest discover -s tools/tests -v",
     "test:desktop-artifact": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/Test-TauriArtifact.ps1",
     "test:desktop-single-instance": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/Test-TauriSingleInstance.ps1",
-    "test:contracts": "ajv validate --spec=draft2020 -s contracts/scene-config-v1.schema.json -d contracts/examples/default-scene-v1.json && ajv validate --spec=draft2020 -s contracts/scene-config-v2.schema.json -d contracts/examples/default-scene-v2.json",
+    "test:contracts": "ajv validate --spec=draft2020 -s contracts/scene-config-v1.schema.json -d contracts/examples/default-scene-v1.json && ajv validate --spec=draft2020 -s contracts/scene-config-v2.schema.json -d contracts/examples/default-scene-v2.json && ajv validate --spec=draft2020 -s contracts/window-spatialization-v1.schema.json -d contracts/examples/default-window-spatialization-v1.json",
     "check": "pnpm --dir apps/desktop check"
   },
   "devDependencies": {

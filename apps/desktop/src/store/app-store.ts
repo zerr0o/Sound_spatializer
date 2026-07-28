@@ -1,15 +1,22 @@
 import { create } from 'zustand';
-import { defaultPreferences, defaultScene, emptyEngineStatus, emptyTrackingMetrics } from '../data/defaults';
+import {
+  defaultPreferences,
+  defaultScene,
+  defaultWindowSpatialization,
+  emptyEngineStatus,
+  emptyTrackingMetrics,
+} from '../data/defaults';
 import type { AudioRouteIssue, RuntimeCapabilities } from '../lib/runtime-capabilities';
 import type {
   AppPreferences,
   AudioDeviceSummary,
   EngineStatusV1,
   HeadPoseSampleV1,
-  PersistedAppConfigV2,
+  PersistedAppConfigV3,
   SceneConfigV2,
   TrackingMetrics,
   ViewId,
+  WindowSpatializationConfigV1,
 } from '../types/contracts';
 
 interface ToastMessage {
@@ -27,15 +34,18 @@ interface AppState {
   audioRouteReady: boolean;
   audioRouteIssue: AudioRouteIssue | null;
   scene: SceneConfigV2;
+  windowSpatialization: WindowSpatializationConfigV1;
   preferences: AppPreferences;
   engine: EngineStatusV1;
   tracking: TrackingMetrics;
   audioDevices: AudioDeviceSummary[];
   toasts: ToastMessage[];
   setActiveView: (view: ViewId) => void;
-  hydrate: (config: PersistedAppConfigV2 | null) => void;
+  hydrate: (config: PersistedAppConfigV3 | null) => void;
   patchScene: (patch: Partial<SceneConfigV2>) => void;
   replaceScene: (scene: SceneConfigV2) => void;
+  patchWindowSpatialization: (patch: Partial<WindowSpatializationConfigV1>) => void;
+  replaceWindowSpatialization: (config: WindowSpatializationConfigV1) => void;
   patchPreferences: (patch: Partial<AppPreferences>) => void;
   setEngine: (engine: EngineStatusV1) => void;
   patchTracking: (tracking: Partial<TrackingMetrics>) => void;
@@ -56,6 +66,7 @@ export const useAppStore = create<AppState>((set) => ({
   audioRouteReady: false,
   audioRouteIssue: null,
   scene: structuredClone(defaultScene),
+  windowSpatialization: structuredClone(defaultWindowSpatialization),
   preferences: { ...defaultPreferences },
   engine: { ...emptyEngineStatus },
   tracking: { ...emptyTrackingMetrics },
@@ -64,13 +75,19 @@ export const useAppStore = create<AppState>((set) => ({
   setActiveView: (activeView) => set({ activeView }),
   hydrate: (config) =>
     set({
-      scene: config?.schemaVersion === 2 ? config.scene : structuredClone(defaultScene),
-      preferences: config?.schemaVersion === 2 ? config.preferences : { ...defaultPreferences },
+      scene: config?.schemaVersion === 3 ? config.scene : structuredClone(defaultScene),
+      windowSpatialization: config?.schemaVersion === 3
+        ? config.windowSpatialization
+        : structuredClone(defaultWindowSpatialization),
+      preferences: config?.schemaVersion === 3 ? config.preferences : { ...defaultPreferences },
       activeView: config?.preferences.onboardingComplete ? 'scene' : 'assistant',
       initialized: true,
     }),
   patchScene: (patch) => set((state) => ({ scene: { ...state.scene, ...patch } })),
   replaceScene: (scene) => set({ scene }),
+  patchWindowSpatialization: (patch) =>
+    set((state) => ({ windowSpatialization: { ...state.windowSpatialization, ...patch } })),
+  replaceWindowSpatialization: (windowSpatialization) => set({ windowSpatialization }),
   patchPreferences: (patch) =>
     set((state) => ({ preferences: { ...state.preferences, ...patch } })),
   setEngine: (engine) => set({ engine }),
@@ -92,8 +109,9 @@ export const useAppStore = create<AppState>((set) => ({
   dismissToast: (id) => set((state) => ({ toasts: state.toasts.filter((item) => item.id !== id) })),
 }));
 
-export const selectPersistedConfig = (state: AppState): PersistedAppConfigV2 => ({
-  schemaVersion: 2,
+export const selectPersistedConfig = (state: AppState): PersistedAppConfigV3 => ({
+  schemaVersion: 3,
   scene: state.scene,
   preferences: state.preferences,
+  windowSpatialization: state.windowSpatialization,
 });

@@ -454,12 +454,15 @@ void append_bands(std::ostringstream& output, const MaterialBands& value) {
     case EngineCommandType::set_hrtf: return "set-hrtf";
     case EngineCommandType::set_headphone_eq: return "set-headphone-eq";
     case EngineCommandType::set_audio_route: return "set-audio-route";
+    case EngineCommandType::set_window_spatialization: return "set-window-spatialization";
     }
     return "start";
 }
 
 [[nodiscard]] EngineCommandType parse_command_type(std::string_view value) {
-    for (std::uint32_t raw = 0; raw <= static_cast<std::uint32_t>(EngineCommandType::set_audio_route); ++raw) {
+    for (std::uint32_t raw = 0;
+         raw <= static_cast<std::uint32_t>(EngineCommandType::set_window_spatialization);
+         ++raw) {
         const auto type = static_cast<EngineCommandType>(raw);
         if (command_type_name(type) == value) return type;
     }
@@ -572,6 +575,66 @@ void append_bands(std::ostringstream& output, const MaterialBands& value) {
         scene.room.surfaces[index].diffusion = bands(field(surface, "diffusion"), "surface.diffusion");
     }
     return scene;
+}
+
+[[nodiscard]] WindowAudioConfig parse_window_audio_value(const JsonValue& root) {
+    const auto& root_object = object(root, "windowSpatialization");
+    reject_unknown_fields(root_object,
+                          {"schemaVersion", "enabled", "maxSources", "stereoSpread",
+                           "followWindowPosition", "displayCalibrations", "sourceRules"},
+                          "windowSpatialization");
+    if (unsigned_integer(field(root_object, "schemaVersion"), "schemaVersion") != 1U)
+        throw std::runtime_error("unsupported window spatialization schema version");
+
+    WindowAudioConfig config{};
+    config.enabled = boolean(field(root_object, "enabled"), "enabled");
+    config.max_applications = unsigned_integer(field(root_object, "maxSources"), "maxSources");
+    config.stereo_spread =
+        static_cast<float>(number(field(root_object, "stereoSpread"), "stereoSpread"));
+    config.follow_window_position =
+        boolean(field(root_object, "followWindowPosition"), "followWindowPosition");
+
+    const auto& calibrations =
+        array(field(root_object, "displayCalibrations"), "displayCalibrations");
+    if (calibrations.size() > kMaximumWindowAudioDisplays)
+        throw std::runtime_error("displayCalibrations contains more than 16 entries");
+    config.display_calibration_count = calibrations.size();
+    for (std::size_t index = 0; index < calibrations.size(); ++index) {
+        const auto& value = object(calibrations[index], "displayCalibration");
+        reject_unknown_fields(value, {"displayId", "centerM", "widthM", "heightM", "orientation"},
+                              "displayCalibration");
+        auto& calibration = config.display_calibrations[index];
+        calibration.display_id = string(field(value, "displayId"), "displayCalibration.displayId");
+        calibration.center_m = vec3(field(value, "centerM"), "displayCalibration.centerM");
+        calibration.width_m =
+            static_cast<float>(number(field(value, "widthM"), "displayCalibration.widthM"));
+        calibration.height_m =
+            static_cast<float>(number(field(value, "heightM"), "displayCalibration.heightM"));
+        calibration.orientation =
+            quaternion(field(value, "orientation"), "displayCalibration.orientation");
+    }
+
+    const auto& rules = array(field(root_object, "sourceRules"), "sourceRules");
+    if (rules.size() > kMaximumWindowAudioSourceRules)
+        throw std::runtime_error("sourceRules contains more than 64 entries");
+    config.source_rule_count = rules.size();
+    for (std::size_t index = 0; index < rules.size(); ++index) {
+        const auto& value = object(rules[index], "sourceRule");
+        reject_unknown_fields(value,
+                              {"applicationId", "enabled", "gainDb", "stereoSpread",
+                               "fallbackDisplayId"},
+                              "sourceRule");
+        auto& rule = config.source_rules[index];
+        rule.application_id = string(field(value, "applicationId"), "sourceRule.applicationId");
+        rule.enabled = boolean(field(value, "enabled"), "sourceRule.enabled");
+        rule.gain_db = static_cast<float>(number(field(value, "gainDb"), "sourceRule.gainDb"));
+        rule.stereo_spread =
+            static_cast<float>(number(field(value, "stereoSpread"), "sourceRule.stereoSpread"));
+        rule.fallback_display_id =
+            nullable_string(field(value, "fallbackDisplayId"), "sourceRule.fallbackDisplayId")
+                .value_or("");
+    }
+    return config;
 }
 
 } // namespace
@@ -759,9 +822,218 @@ ParseResult<SceneConfigV2> scene_config_from_json(std::string_view json) noexcep
     }
 }
 
+bool validate_window_audio_config(const WindowAudioConfig& config, std::string& error) noexcept {
+    const auto fail = [&error](std::string message) {
+        error = std::move(message);
+        return false;
+    };
+    const auto finite_vec3 = [](const Vec3f& value) {
+        return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+    };
+    if (config.max_applications == 0 ||
+        config.max_applications > kMaximumWindowAudioApplications)
+        return fail("window maxSources must be between 1 and 8");
+    if (!std::isfinite(config.stereo_spread) || config.stereo_spread < 0.0F ||
+        config.stereo_spread > 1.0F)
+        return fail("window stereoSpread must be between 0 and 1");
+    if (!finite_vec3(config.listener_position_m))
+        return fail("window listener position must be finite");
+    if (config.refresh_interval_ms < 10U || config.refresh_interval_ms > 5'000U)
+        return fail("window refresh interval must be between 10 and 5000 ms");
+    if (config.display_calibration_count > kMaximumWindowAudioDisplays)
+        return fail("window display calibration count exceeds 16");
+    if (config.source_rule_count > kMaximumWindowAudioSourceRules)
+        return fail("window source rule count exceeds 64");
+
+    for (std::size_t index = 0; index < config.display_calibration_count; ++index) {
+        const auto& display = config.display_calibrations[index];
+        if (display.display_id.empty() ||
+            display.display_id.size() >= kWindowAudioDisplayIdBytes)
+            return fail("window displayId is empty or too long");
+        if (!finite_vec3(display.center_m) || !std::isfinite(display.width_m) ||
+            !std::isfinite(display.height_m) || display.width_m <= 0.1F ||
+            display.width_m > 5.0F || display.height_m <= 0.1F ||
+            display.height_m > 5.0F)
+            return fail("window display calibration dimensions are invalid");
+        const auto& q = display.orientation;
+        const float norm =
+            std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+        if (!std::isfinite(norm) || norm < 0.8F || norm > 1.2F)
+            return fail("window display orientation must be approximately unit length");
+        for (std::size_t previous = 0; previous < index; ++previous)
+            if (endpoint_ids_equal(
+                    config.display_calibrations[previous].display_id,
+                    display.display_id))
+                return fail("window display calibrations contain duplicate displayId values");
+    }
+
+    for (std::size_t index = 0; index < config.source_rule_count; ++index) {
+        const auto& rule = config.source_rules[index];
+        if (rule.application_id.empty() ||
+            rule.application_id.size() >= kWindowAudioApplicationIdBytes)
+            return fail("window source applicationId is empty or too long");
+        if (!std::isfinite(rule.gain_db) || rule.gain_db < -60.0F ||
+            rule.gain_db > 12.0F || !std::isfinite(rule.stereo_spread) ||
+            rule.stereo_spread < 0.0F || rule.stereo_spread > 1.0F)
+            return fail("window source rule gain or stereo spread is invalid");
+        if (rule.fallback_display_id.size() >= kWindowAudioDisplayIdBytes)
+            return fail("window source fallback displayId is too long");
+        for (std::size_t previous = 0; previous < index; ++previous)
+            if (endpoint_ids_equal(
+                    config.source_rules[previous].application_id,
+                    rule.application_id))
+                return fail("window source rules contain duplicate applicationId values");
+    }
+    error.clear();
+    return true;
+}
+
+std::string window_audio_config_to_json(const WindowAudioConfig& config) {
+    std::ostringstream output;
+    output << std::setprecision(std::numeric_limits<float>::max_digits10);
+    output << "{\"schemaVersion\":1,\"enabled\":"
+           << (config.enabled ? "true" : "false")
+           << ",\"maxSources\":" << config.max_applications
+           << ",\"stereoSpread\":" << config.stereo_spread
+           << ",\"followWindowPosition\":"
+           << (config.follow_window_position ? "true" : "false")
+           << ",\"displayCalibrations\":[";
+    for (std::size_t index = 0; index < config.display_calibration_count; ++index) {
+        if (index != 0) output << ',';
+        const auto& display = config.display_calibrations[index];
+        output << "{\"displayId\":";
+        append_escaped(output, display.display_id);
+        output << ",\"centerM\":";
+        append_vec3(output, display.center_m);
+        output << ",\"widthM\":" << display.width_m
+               << ",\"heightM\":" << display.height_m
+               << ",\"orientation\":";
+        append_quaternion(output, display.orientation.normalized_value());
+        output << '}';
+    }
+    output << "],\"sourceRules\":[";
+    for (std::size_t index = 0; index < config.source_rule_count; ++index) {
+        if (index != 0) output << ',';
+        const auto& rule = config.source_rules[index];
+        output << "{\"applicationId\":";
+        append_escaped(output, rule.application_id);
+        output << ",\"enabled\":" << (rule.enabled ? "true" : "false")
+               << ",\"gainDb\":" << rule.gain_db
+               << ",\"stereoSpread\":" << rule.stereo_spread
+               << ",\"fallbackDisplayId\":";
+        if (rule.fallback_display_id.empty())
+            output << "null";
+        else
+            append_escaped(output, rule.fallback_display_id);
+        output << '}';
+    }
+    output << "]}";
+    return output.str();
+}
+
+ParseResult<WindowAudioConfig> window_audio_config_from_json(
+    std::string_view json) noexcept {
+    try {
+        WindowAudioConfig config = parse_window_audio_value(JsonParser(json).parse());
+        std::string validation_error;
+        if (!validate_window_audio_config(config, validation_error))
+            return {std::nullopt, std::move(validation_error)};
+        return {std::move(config), {}};
+    } catch (const std::exception& exception) {
+        return {std::nullopt, exception.what()};
+    } catch (...) {
+        return {std::nullopt, "unknown window spatialization JSON parsing error"};
+    }
+}
+
+std::string window_audio_status_to_json(
+    const WindowAudioSnapshot& snapshot, const WindowAudioDiagnostics& diagnostics) {
+    const auto fixed_string = [](const auto& value) -> std::string_view {
+        const auto end = std::find(value.begin(), value.end(), '\0');
+        return {value.data(), static_cast<std::size_t>(end - value.begin())};
+    };
+    const auto capture_state_name = [](WindowAudioCaptureState state) {
+        switch (state) {
+        case WindowAudioCaptureState::inactive: return "inactive";
+        case WindowAudioCaptureState::activating: return "activating";
+        case WindowAudioCaptureState::capturing: return "capturing";
+        case WindowAudioCaptureState::unsupported_format: return "unsupported-format";
+        case WindowAudioCaptureState::failed: return "failed";
+        }
+        return "failed";
+    };
+
+    std::ostringstream output;
+    output << std::setprecision(std::numeric_limits<float>::max_digits10);
+    const std::size_t display_count =
+        std::min(snapshot.display_count, snapshot.displays.size());
+    const std::size_t source_count =
+        std::min(snapshot.window_source_count, snapshot.window_sources.size());
+    output << "{\"supported\":" << (diagnostics.supported ? "true" : "false")
+           << ",\"running\":" << (diagnostics.running ? "true" : "false")
+           << ",\"sourceCount\":" << diagnostics.active_slots
+           << ",\"sequence\":" << snapshot.sequence << ",\"displays\":[";
+    for (std::size_t index = 0; index < display_count; ++index) {
+        if (index != 0) output << ',';
+        const auto& display = snapshot.displays[index];
+        output << "{\"id\":";
+        append_escaped(output, fixed_string(display.id));
+        output << ",\"name\":";
+        append_escaped(output, fixed_string(display.name));
+        output << ",\"isPrimary\":" << (display.primary ? "true" : "false")
+               << ",\"boundsPx\":{\"left\":" << display.bounds_px.left
+               << ",\"top\":" << display.bounds_px.top
+               << ",\"right\":" << display.bounds_px.right
+               << ",\"bottom\":" << display.bounds_px.bottom << "},\"centerM\":";
+        append_vec3(output, display.center_m);
+        output << ",\"widthM\":" << display.width_m
+               << ",\"heightM\":" << display.height_m << ",\"orientation\":";
+        append_quaternion(output, display.orientation);
+        output << '}';
+    }
+    output << "],\"windowSources\":[";
+    for (std::size_t index = 0; index < source_count; ++index) {
+        if (index != 0) output << ',';
+        const auto& source = snapshot.window_sources[index];
+        output << "{\"sourceId\":";
+        append_escaped(output, fixed_string(source.source_id));
+        output << ",\"applicationId\":";
+        append_escaped(output, fixed_string(source.application_id));
+        output << ",\"applicationName\":";
+        append_escaped(output, fixed_string(source.application_name));
+        output << ",\"windowTitle\":";
+        append_escaped(output, fixed_string(source.window_title));
+        output << ",\"processId\":" << source.process_id << ",\"displayId\":";
+        append_escaped(output, fixed_string(source.display_id));
+        output << ",\"active\":" << (source.active ? "true" : "false")
+               << ",\"leftPositionM\":";
+        append_vec3(output, source.left_position_m);
+        output << ",\"rightPositionM\":";
+        append_vec3(output, source.right_position_m);
+        output << ",\"gainDb\":" << source.gain_db
+               << ",\"sampleRate\":" << source.sample_rate
+               << ",\"channelCount\":" << source.channel_count
+               << ",\"captureState\":";
+        append_escaped(output, capture_state_name(source.capture_state));
+        output << '}';
+    }
+    output << "],\"diagnostics\":{\"discoveryPasses\":"
+           << diagnostics.discovery_passes << ",\"sessionsSeen\":"
+           << diagnostics.sessions_seen << ",\"captureStartFailures\":"
+           << diagnostics.capture_start_failures << ",\"fifoOverruns\":"
+           << diagnostics.fifo_overruns << ",\"fifoUnderruns\":"
+           << diagnostics.fifo_underruns << ",\"lastError\":";
+    append_escaped(output, fixed_string(diagnostics.last_error));
+    output << "}}";
+    return output.str();
+}
+
 std::string engine_command_to_json(const EngineCommandV1& command) {
     std::ostringstream output;
-    output << "{\"schemaVersion\":" << command.schema_version << ",\"type\":";
+    output << "{\"schemaVersion\":" << command.schema_version;
+    if (command.command_id != 0)
+        output << ",\"commandId\":" << command.command_id;
+    output << ",\"type\":";
     append_escaped(output, command_type_name(command.type));
     switch (command.type) {
     case EngineCommandType::set_bypass: output << ",\"enabled\":" << (command.bool_value ? "true" : "false"); break;
@@ -793,10 +1065,47 @@ std::string engine_command_to_json(const EngineCommandV1& command) {
         output << ",\"outputDeviceId\":";
         append_optional_string(output, command.output_device_id);
         break;
+    case EngineCommandType::set_window_spatialization:
+        output << ",\"config\":"
+               << (command.string_value.empty()
+                       ? window_audio_config_to_json(WindowAudioConfig{})
+                       : command.string_value);
+        break;
     default: break;
     }
     output << '}';
     return output.str();
+}
+
+std::string engine_command_result_to_json(std::uint32_t command_id,
+                                          bool accepted,
+                                          bool persisted,
+                                          std::string_view error) {
+    std::ostringstream output;
+    output << "{\"schemaVersion\":1,\"kind\":\"command-result\",\"commandId\":"
+           << command_id << ",\"accepted\":" << (accepted ? "true" : "false")
+           << ",\"persisted\":" << (persisted ? "true" : "false")
+           << ",\"error\":";
+    append_escaped(output, error);
+    output << '}';
+    return output.str();
+}
+
+ParseResult<std::uint32_t> engine_command_id_from_json(
+    std::string_view json) noexcept {
+    try {
+        const JsonValue root = JsonParser(json).parse();
+        const auto& root_object = object(root, "command");
+        const JsonValue* command_id = optional_field(root_object, "commandId");
+        return {command_id != nullptr
+                    ? unsigned_integer(*command_id, "commandId")
+                    : 0U,
+                {}};
+    } catch (const std::exception& exception) {
+        return {std::nullopt, exception.what()};
+    } catch (...) {
+        return {std::nullopt, "unknown command ID parsing error"};
+    }
 }
 
 ParseResult<EngineCommandV1> engine_command_from_json(std::string_view json) noexcept {
@@ -806,24 +1115,26 @@ ParseResult<EngineCommandV1> engine_command_from_json(std::string_view json) noe
         EngineCommandV1 command{};
         command.schema_version = unsigned_integer(field(root_object, "schemaVersion"), "schemaVersion");
         if (command.schema_version != 1) throw std::runtime_error("unsupported command schema version");
+        if (const JsonValue* command_id = optional_field(root_object, "commandId"))
+            command.command_id = unsigned_integer(*command_id, "commandId");
         command.type = parse_command_type(string(field(root_object, "type"), "type"));
         switch (command.type) {
         case EngineCommandType::start:
         case EngineCommandType::stop:
-            reject_unknown_fields(root_object, {"schemaVersion", "type"}, "command");
+            reject_unknown_fields(root_object, {"schemaVersion", "commandId", "type"}, "command");
             break;
         case EngineCommandType::set_bypass:
-            reject_unknown_fields(root_object, {"schemaVersion", "type", "enabled"}, "command");
+            reject_unknown_fields(root_object, {"schemaVersion", "commandId", "type", "enabled"}, "command");
             command.bool_value = boolean(field(root_object, "enabled"), "enabled"); break;
         case EngineCommandType::set_output_device:
-            reject_unknown_fields(root_object, {"schemaVersion", "type", "deviceId"}, "command");
+            reject_unknown_fields(root_object, {"schemaVersion", "commandId", "type", "deviceId"}, "command");
             command.string_value = string(field(root_object, "deviceId"), "deviceId"); break;
         case EngineCommandType::set_audio_mode:
-            reject_unknown_fields(root_object, {"schemaVersion", "type", "mode"}, "command");
+            reject_unknown_fields(root_object, {"schemaVersion", "commandId", "type", "mode"}, "command");
             command.audio_mode = parse_audio_mode(string(field(root_object, "mode"), "mode")); break;
         case EngineCommandType::calibrate_neutral:
         {
-            reject_unknown_fields(root_object, {"schemaVersion", "type", "quaternion"}, "command");
+            reject_unknown_fields(root_object, {"schemaVersion", "commandId", "type", "quaternion"}, "command");
             const Quaternionf parsed_quaternion = quaternion(field(root_object, "quaternion"), "quaternion");
             const float norm = std::sqrt(parsed_quaternion.w * parsed_quaternion.w + parsed_quaternion.x * parsed_quaternion.x +
                                          parsed_quaternion.y * parsed_quaternion.y + parsed_quaternion.z * parsed_quaternion.z);
@@ -833,16 +1144,16 @@ ParseResult<EngineCommandV1> engine_command_from_json(std::string_view json) noe
             break;
         }
         case EngineCommandType::set_scene:
-            reject_unknown_fields(root_object, {"schemaVersion", "type", "scene"}, "command");
+            reject_unknown_fields(root_object, {"schemaVersion", "commandId", "type", "scene"}, "command");
             command.scene = parse_scene_value(field(root_object, "scene")); break;
         case EngineCommandType::set_hrtf: {
-            reject_unknown_fields(root_object, {"schemaVersion", "type", "profileId", "sofaPath"}, "command");
+            reject_unknown_fields(root_object, {"schemaVersion", "commandId", "type", "profileId", "sofaPath"}, "command");
             command.string_value = string(field(root_object, "profileId"), "profileId");
             command.optional_string_value = nullable_string(field(root_object, "sofaPath"), "sofaPath");
             break;
         }
         case EngineCommandType::set_headphone_eq: {
-            reject_unknown_fields(root_object, {"schemaVersion", "type", "eq"}, "command");
+            reject_unknown_fields(root_object, {"schemaVersion", "commandId", "type", "eq"}, "command");
             const auto& eq = object(field(root_object, "eq"), "eq");
             reject_unknown_fields(eq, {"enabled", "preampDb", "profileName", "bands"}, "eq");
             command.headphone_eq.enabled = boolean(field(eq, "enabled"), "eq.enabled");
@@ -868,7 +1179,7 @@ ParseResult<EngineCommandV1> engine_command_from_json(std::string_view json) noe
             break;
         }
         case EngineCommandType::set_audio_route:
-            reject_unknown_fields(root_object, {"schemaVersion", "type", "captureProvider",
+            reject_unknown_fields(root_object, {"schemaVersion", "commandId", "type", "captureProvider",
                                                  "captureEndpointId", "outputDeviceId"}, "command");
             command.capture_provider = parse_capture_provider(
                 string(field(root_object, "captureProvider"), "captureProvider"));
@@ -876,6 +1187,15 @@ ParseResult<EngineCommandV1> engine_command_from_json(std::string_view json) noe
                 field(root_object, "captureEndpointId"), "captureEndpointId");
             command.output_device_id = nullable_string(field(root_object, "outputDeviceId"), "outputDeviceId");
             break;
+        case EngineCommandType::set_window_spatialization: {
+            reject_unknown_fields(root_object, {"schemaVersion", "commandId", "type", "config"}, "command");
+            WindowAudioConfig config = parse_window_audio_value(field(root_object, "config"));
+            std::string validation_error;
+            if (!validate_window_audio_config(config, validation_error))
+                throw std::runtime_error(validation_error);
+            command.string_value = window_audio_config_to_json(config);
+            break;
+        }
         }
         return {std::move(command), {}};
     } catch (const std::exception& exception) {
@@ -915,7 +1235,8 @@ std::string engine_status_to_json(const EngineStatusV1& status) {
     };
     std::ostringstream output;
     output << std::setprecision(std::numeric_limits<float>::max_digits10);
-    output << "{\"schemaVersion\":" << status.schema_version << ",\"captureState\":";
+    output << "{\"schemaVersion\":" << status.schema_version
+           << ",\"commandAckVersion\":1,\"captureState\":";
     append_escaped(output, stream_name(status.capture_state));
     output << ",\"renderState\":"; append_escaped(output, stream_name(status.render_state));
     output << ",\"trackingState\":"; append_escaped(output, tracking_name(status.tracking_state));
@@ -934,6 +1255,17 @@ std::string engine_status_to_json(const EngineStatusV1& status) {
            << ",\"latencyP50Ms\":" << status.latency_p50_ms << ",\"latencyP95Ms\":" << status.latency_p95_ms
            << ",\"resampleRatio\":" << status.current_resample_ratio
            << ",\"potentiallyBinaural\":" << (status.potentially_binaural ? "true" : "false")
+           << ",\"spatialInputMode\":";
+    append_escaped(output, status.window_audio_rendering ? "process-windows"
+                                                         : "endpoint-mix");
+    output << ",\"requestedSpatialInputMode\":";
+    append_escaped(output, status.window_audio_enabled ? "process-windows"
+                                                       : "endpoint-mix");
+    output << ",\"windowAudio\":"
+           << (status.window_audio_json.empty()
+                   ? "{\"supported\":false,\"running\":false,\"sourceCount\":0,\"sequence\":0,"
+                     "\"displays\":[],\"windowSources\":[],\"diagnostics\":{\"lastError\":\"\"}}"
+                   : status.window_audio_json)
            << ",\"lastError\":";
     append_escaped(output, status.last_error);
     output << '}';
@@ -991,6 +1323,67 @@ bool ConfigStore::save_scene(const SceneConfigV2& scene, std::string& error) con
     } catch (...) {
         error = "unknown config persistence error";
         return false;
+    }
+}
+
+bool ConfigStore::save_window_audio_config(const WindowAudioConfig& config,
+                                           std::string& error) const noexcept {
+    try {
+        if (!validate_window_audio_config(config, error)) return false;
+        std::filesystem::create_directories(base_directory_);
+        const std::filesystem::path destination = window_audio_path();
+        const std::filesystem::path temporary = destination.string() + ".tmp";
+        {
+            std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+            if (!stream) {
+                error = "could not create temporary window spatialization config";
+                return false;
+            }
+            const std::string json = window_audio_config_to_json(config);
+            stream.write(json.data(), static_cast<std::streamsize>(json.size()));
+            stream.flush();
+            if (!stream) {
+                error = "could not flush temporary window spatialization config";
+                return false;
+            }
+        }
+#if defined(_WIN32)
+        if (!MoveFileExW(temporary.c_str(), destination.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            error = "atomic window config replacement failed with Win32 error " +
+                    std::to_string(GetLastError());
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            return false;
+        }
+#else
+        std::filesystem::rename(temporary, destination);
+#endif
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    } catch (...) {
+        error = "unknown window config persistence error";
+        return false;
+    }
+}
+
+ParseResult<WindowAudioConfig> ConfigStore::load_window_audio_config() const noexcept {
+    try {
+        std::ifstream stream(window_audio_path(), std::ios::binary);
+        if (!stream)
+            return {std::nullopt, "window spatialization config does not exist"};
+        std::ostringstream contents;
+        contents << stream.rdbuf();
+        if (!stream.good() && !stream.eof())
+            return {std::nullopt, "could not read window spatialization config"};
+        return window_audio_config_from_json(contents.str());
+    } catch (const std::exception& exception) {
+        return {std::nullopt, exception.what()};
+    } catch (...) {
+        return {std::nullopt, "unknown window config loading error"};
     }
 }
 

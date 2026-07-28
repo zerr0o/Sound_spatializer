@@ -334,6 +334,7 @@ private:
     bool initialization_succeeded_{};
     mutable std::mutex error_mutex_{};
     std::string last_error_{};
+    std::string resolved_capture_endpoint_id_{};
     std::atomic<std::uint32_t> runtime_error_{static_cast<std::uint32_t>(RuntimeAudioError::none)};
     std::atomic<std::uint32_t> capture_state_{static_cast<std::uint32_t>(StreamState::stopped)};
     std::atomic<std::uint32_t> render_state_{static_cast<std::uint32_t>(StreamState::stopped)};
@@ -366,6 +367,7 @@ bool WasapiAudioBackend::start(const AudioBackendConfig& config, IAudioProcessor
     {
         std::scoped_lock lock(error_mutex_);
         last_error_.clear();
+        resolved_capture_endpoint_id_.clear();
     }
     {
         std::scoped_lock lock(initialization_mutex_);
@@ -441,12 +443,14 @@ AudioBackendDiagnostics WasapiAudioBackend::diagnostics() const {
     result.callback_cpu_percent = callback_cpu_.load(std::memory_order_relaxed);
     result.resample_ratio = resample_ratio_.load(std::memory_order_relaxed);
     const auto runtime_error = static_cast<RuntimeAudioError>(runtime_error_.load(std::memory_order_acquire));
-    if (runtime_error != RuntimeAudioError::none) {
-        result.last_error = runtime_error_message(runtime_error);
-    } else {
+    {
         std::scoped_lock lock(error_mutex_);
-        result.last_error = last_error_;
+        result.capture_endpoint_id = resolved_capture_endpoint_id_;
+        if (runtime_error == RuntimeAudioError::none)
+            result.last_error = last_error_;
     }
+    if (runtime_error != RuntimeAudioError::none)
+        result.last_error = runtime_error_message(runtime_error);
     return result;
 }
 
@@ -493,6 +497,10 @@ void WasapiAudioBackend::worker(std::stop_token stop_token) {
             enumerator.Get(), config_.capture_provider, config_.capture_endpoint_id,
             config_.native_test_override_endpoint_id);
         if (!capture_endpoint) { finish_initialization(false, capture_endpoint.error); break; }
+        {
+            std::scoped_lock lock(error_mutex_);
+            resolved_capture_endpoint_id_ = capture_endpoint.id;
+        }
         ComPtr<IMMDevice> capture_device;
         const std::wstring capture_id = utf8_to_wide(capture_endpoint.id);
         if (capture_id.empty()) { finish_initialization(false, "selected capture endpoint id is not valid UTF-8"); break; }

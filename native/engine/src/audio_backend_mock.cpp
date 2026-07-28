@@ -129,6 +129,12 @@ bool MockAudioBackend::start(const AudioBackendConfig& config, IAudioProcessor& 
     diagnostics_.capture_sample_rate = kSampleRate;
     diagnostics_.render_sample_rate = kSampleRate;
     diagnostics_.render_sample_format = AudioSampleFormat::float32;
+    diagnostics_.capture_endpoint_id =
+        config.capture_provider == CaptureProvider::external_render
+            ? config.capture_endpoint_id
+            : (!config.native_test_override_endpoint_id.empty()
+                   ? config.native_test_override_endpoint_id
+                   : "mock-native-render-endpoint");
     diagnostics_.capture_period_frames = config.requested_buffer_frames;
     diagnostics_.render_period_frames = config.requested_buffer_frames;
     running_ = true;

@@ -21,6 +21,30 @@ Webcam → Worker MediaPipe → quaternion horodaté ──pipe Pose dédié─�
 Tauri/React ──commandes et télémétrie JSON──pipe Engine duplex────┘
 ```
 
+Le mode stéréo par fenêtres remplace, à l'intérieur du moteur, le lit L/R par
+jusqu'à huit captures process-loopback indépendantes. Chaque entrée part d'une
+session audio, puis les sessions d'un même PID et les descendants déjà couverts
+par un parent sont dédupliqués en arbres de processus. Un arbre fournit deux
+sources L/R dont la position provient de sa fenêtre associée et du plan d'écran
+Windows, soit une matrice HRTF dynamique maximale 16×2. Le renderer
+physique et l'endpoint source restent les mêmes ; le mix global capturé par le
+backend sert encore d'horloge et de repli. Le passage aux processus est
+atomique : toutes les racines de sessions actives observées doivent avoir un
+slot prêt. Une session système, exclue, désactivée, non assignée ou en échec
+maintient donc le mix endpoint complet ; aucun sous-ensemble process n'est rendu
+seul. Une fois la couverture complète, l'endpoint est exclu et n'est jamais
+additionné au rendu par processus. Deux indices HRTF supplémentaires restent
+réservés au repli endpoint L/R dans les banques par fenêtres ; cette paire
+dormante rend les transitions asynchrones audibles sans réutiliser les seize
+indices stables des applications.
+
+La découverte des sessions utilise l'identifiant canonique de l'endpoint
+effectivement résolu par le backend WASAPI après sélection par marqueur ou ID
+explicite. Elle ne retombe donc jamais implicitement sur la sortie Windows par
+défaut lorsque le pilote natif est choisi. Chaque slot process-loopback conserve
+également sa paire fixe d'indices HRTF ; la disparition d'un slot inférieur ne
+remappe pas transitoirement les applications restantes sur d'anciens filtres.
+
 L'endpoint virtuel est une source pour le moteur, jamais une destination. Le
 moteur rejette son GUID stable lors de l'énumération des sorties afin d'empêcher
 une boucle audio, indépendamment du nom affiché ou de la langue de Windows.
@@ -62,9 +86,16 @@ Tauri ne traite jamais le signal audio. Il supervise un moteur autonome et peut
 ### Moteur natif
 
 Le moteur possède les clients WASAPI, l'horloge audio, tous les états DSP et les
-files SPSC. Les changements de HRTF ou de pièce sont préparés hors callback puis
-publiés par échange atomique et fondu. Le tracking est filtré dans l'espace du
-vecteur de rotation et prédit au plus 20 ms vers l'instant de rendu.
+files SPSC. L'interpolation des HRIR et la projection de pièce sont préparées
+hors callback puis publiées par échange atomique et fondu. La préparation des
+spectres partitionnés et du cache de transition reste une limite temps réel
+explicitement suivie dans `VALIDATION.md`. Le tracking est filtré dans l'espace
+du vecteur de rotation et prédit au plus 20 ms vers l'instant de rendu.
+
+La découverte des fenêtres et sessions, les appels COM/DWM et l'activation des
+captures par processus s'exécutent sur des threads de contrôle. Chaque session
+alimente un ASRC stéréo préalloué ; le callback ne voit que des handles
+générationnels, un snapshot atomique et des positions atomiques.
 
 Le callback MMCSS respecte les invariants suivants :
 
@@ -84,7 +115,9 @@ produit.
 
 ## Contrats
 
-Le schéma persistant canonique est `contracts/scene-config-v2.schema.json`. Les
+Le schéma persistant canonique de scène est
+`contracts/scene-config-v2.schema.json`. Le mode dynamique utilise séparément
+`contracts/window-spatialization-v1.schema.json`. Les
 configurations V1 sont relues puis migrées sans écraser leur fichier source. Les
 types plus riches de l'interface doivent être convertis explicitement à cette
 forme ; ils ne constituent pas un second format implicite.
@@ -95,6 +128,14 @@ précédés d'une longueur, avec une limite stricte. Les deux pipes sont version
 suffixés par le SID et l'identifiant de session Windows, créés en instance unique
 et protégés par une ACL pour ce SID. Les migrations de
 configuration sont monotones et atomiques (`temp` + remplacement).
+
+Chaque commande JSON porte un identifiant injecté par l'hôte Tauri. Le moteur
+répond sur le pipe duplex par un ACK/NACK portant le même identifiant ; une
+écriture réussie dans le pipe n'est donc jamais confondue avec l'application
+effective d'une commande. La réponse distingue l'application en mémoire de la
+persistance atomique. Les attentes sont rattachées à une génération de
+connexion : la fermeture tardive d'un ancien lecteur ne peut pas invalider les
+commandes déjà envoyées sur le pipe reconnecté.
 
 ## Repère spatial
 

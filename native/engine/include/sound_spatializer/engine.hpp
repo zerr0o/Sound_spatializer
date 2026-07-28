@@ -6,6 +6,7 @@
 #include "sound_spatializer/hrtf_worker.hpp"
 #include "sound_spatializer/latency_statistics.hpp"
 #include "sound_spatializer/pose.hpp"
+#include "sound_spatializer/window_audio.hpp"
 
 #include <array>
 #include <atomic>
@@ -24,6 +25,11 @@ class SpatialAudioEngine final : public IAudioProcessor {
 public:
     SpatialAudioEngine();
     explicit SpatialAudioEngine(std::unique_ptr<IAudioBackend> backend);
+    SpatialAudioEngine(std::unique_ptr<IAudioBackend> backend,
+                       std::unique_ptr<IWindowAudioCapture> window_audio_capture);
+    SpatialAudioEngine(std::unique_ptr<IAudioBackend> backend,
+                       std::unique_ptr<IWindowAudioCapture> window_audio_capture,
+                       std::unique_ptr<IHrtfDatabase> builtin_hrtf);
     ~SpatialAudioEngine() override;
 
     SpatialAudioEngine(const SpatialAudioEngine&) = delete;
@@ -37,6 +43,9 @@ public:
     [[nodiscard]] bool start_audio(std::string& error);
     void stop_audio() noexcept;
     [[nodiscard]] bool execute_command(const EngineCommandV1& command, std::string& error);
+    [[nodiscard]] bool set_window_spatialization(const WindowAudioConfig& config,
+                                                 std::string& error);
+    [[nodiscard]] WindowAudioConfig window_spatialization() const;
     [[nodiscard]] EngineStatusV1 status() const;
     [[nodiscard]] std::size_t cached_personal_hrtf_count() const;
 
@@ -83,8 +92,10 @@ private:
     [[nodiscard]] static double qpc_to_seconds(std::int64_t value) noexcept;
 
     std::unique_ptr<IAudioBackend> backend_{};
+    std::unique_ptr<IWindowAudioCapture> window_audio_capture_{};
     mutable std::mutex control_mutex_{};
     SceneConfigV2 scene_{};
+    WindowAudioConfig window_audio_config_{};
     std::string virtual_endpoint_id_{};
     std::string hrtf_warning_{};
     // Persistent, non-fatal diagnostic when a requested hardware audio mode
@@ -129,6 +140,36 @@ private:
     LfeRenderer lfe_renderer_{};
     PotentialBinauralDetector binaural_detector_{};
     std::atomic<bool> potentially_binaural_{};
+    std::atomic<bool> window_audio_requested_{};
+    std::atomic<bool> window_audio_rendering_status_{};
+    bool active_window_audio_enabled_{};
+    // The requested window mode and the source set that is safe to render are
+    // deliberately separate. Process-loopback discovery/activation is
+    // asynchronous; until at least one capture is actually ready, the endpoint
+    // mix remains the audible fallback.
+    bool active_window_audio_rendering_{};
+    // PCM readiness is insufficient for a safe handoff: a sparse process slot
+    // may not exist in the currently-active stereo HRTF bank. The endpoint
+    // remains authoritative until the worker's matching scene revision has
+    // been accepted by the convolver.
+    bool window_filter_handoff_waiting_{};
+    std::uint64_t window_filter_handoff_revision_{};
+    static constexpr std::uint32_t kWindowTransportCrossfadeFrames = 240;
+    std::uint32_t window_transport_crossfade_remaining_{};
+    std::uint32_t window_output_declick_remaining_{};
+    StereoFrame window_output_declick_hold_{};
+    StereoFrame last_output_frame_{};
+    bool last_output_frame_valid_{};
+    std::size_t active_window_source_count_{};
+    std::array<Vec3f, kMaximumBinauralSources> active_window_positions_{};
+    std::array<float, kMaximumBinauralSources> active_window_gains_{};
+    std::array<WindowAudioSlotHandle, kMaximumWindowAudioApplications>
+        active_window_handles_{};
+    // A generation joins the HRTF topology only after its first complete PCM
+    // block. Once primed, a short ASRC underrun supplies silence without
+    // tearing down and rebuilding the sparse filter bank.
+    std::array<WindowAudioSlotHandle, kMaximumWindowAudioApplications>
+        primed_window_handles_{};
     std::array<EarlyReflectionProcessor, kDirectionalSourceCount> early_reflections_{};
     AmbisonicBinauralDecoderOrder3 room_decoder_{};
     LateReverbFdn16 late_reverb_{};
@@ -144,6 +185,9 @@ private:
     std::array<StereoFrame, kMaximumProcessChunk> bypass_dry_{};
     std::array<StereoFrame, kMaximumProcessChunk> detector_input_{};
     std::array<DirectionalFrame, kMaximumProcessChunk> directional_input_{};
+    std::array<std::array<StereoFrame, kMaximumProcessChunk>,
+               kMaximumWindowAudioApplications>
+        window_source_input_{};
 };
 
 } // namespace sound_spatializer

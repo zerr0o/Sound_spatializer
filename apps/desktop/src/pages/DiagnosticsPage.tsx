@@ -22,10 +22,25 @@ export function DiagnosticsPage() {
   const captureEndpoint = scene.captureProvider === 'native-driver'
     ? audioDevices.find((device) => device.isSoundSpatializerEndpoint) ?? null
     : audioDevices.find((device) => sameAudioEndpoint(device.id, scene.captureEndpointId)) ?? null;
-  const captureTitle = scene.captureProvider === 'native-driver' ? 'Capture pilote natif' : 'Capture endpoint externe';
-  const inputLayoutLabel = engine.inputLayout === '5.1-surround' ? '5.1 surround' : 'stéréo';
+  const windowInput = engine.spatialInputMode === 'process-windows';
+  const windowInputRequested = engine.requestedSpatialInputMode === 'process-windows';
+  const windowFallback = windowInputRequested && !windowInput;
+  const processFifoInterruptions =
+    engine.windowAudio.fifoOverruns + engine.windowAudio.fifoUnderruns;
+  const processFifoDetail =
+    `${engine.windowAudio.fifoOverruns} overrun(s) · ${engine.windowAudio.fifoUnderruns} underrun(s)`;
+  const captureTitle = windowInput
+    ? 'Capture stéréo par session/processus'
+    : windowFallback
+      ? 'Repli de sécurité sur le mix endpoint'
+    : scene.captureProvider === 'native-driver' ? 'Capture pilote natif' : 'Capture endpoint externe';
+  const inputLayoutLabel = windowInput
+    ? `${engine.windowAudio.sourceCount} paire(s) L/R`
+    : engine.inputLayout === '5.1-surround' ? '5.1 surround' : 'stéréo';
   const captureMask = `0x${engine.captureChannelMask.toString(16).toUpperCase()}`;
-  const captureDetail = captureEndpoint
+  const captureDetail = windowInput
+    ? `${engine.windowAudio.sourceCount} session(s)/arbre(s) de processus · ${engine.windowAudio.displays.length} écran(s)`
+    : captureEndpoint
     ? `${captureEndpoint.name} · ${engine.captureChannels} canaux · masque ${captureMask} · ${captureEndpoint.sampleRate / 1000} kHz · ${engine.capturePeriodMs.toFixed(2)} ms`
     : scene.captureProvider === 'native-driver' ? 'Endpoint Sound Spatializer indisponible' : 'Source externe indisponible';
 
@@ -48,8 +63,14 @@ export function DiagnosticsPage() {
     if (latency === 0) issues.push('Estimation moteur mouvement→PCM indisponible');
     if (latency > LIMITS.motionCeiling) issues.push('Estimation moteur mouvement→PCM au-dessus du plafond indicatif');
     if (engine.xruns > 0) issues.push(`${engine.xruns} interruption(s) audio`);
+    if (windowInput && !engine.windowAudio.supported) issues.push('Capture audio par processus non prise en charge');
+    if (windowInput && engine.windowAudio.lastError) issues.push(engine.windowAudio.lastError);
+    if (windowInputRequested && processFifoInterruptions > 0) {
+      issues.push(`${processFifoInterruptions} interruption(s) FIFO des captures par processus`);
+    }
+    if (windowFallback) issues.push('Couverture par session incomplète ou en cours — mix endpoint complet conservé');
     return issues;
-  }, [engine.connection, engine.renderActive, engine.trackingActive, engine.xruns, latency, tracking.fps, tracking.pose?.trackingState, tracking.state]);
+  }, [engine.connection, engine.renderActive, engine.trackingActive, engine.windowAudio.lastError, engine.windowAudio.supported, engine.xruns, latency, processFifoInterruptions, tracking.fps, tracking.pose?.trackingState, tracking.state, windowFallback, windowInput, windowInputRequested]);
 
   const exportReport = async () => {
     try {
@@ -117,8 +138,23 @@ export function DiagnosticsPage() {
           <div className="signal-list">
             <SignalRow icon={<Waves size={17} />} title={captureTitle} detail={captureDetail} active={engine.captureActive} preview={preview} />
             <SignalRow icon={<Activity size={17} />} title="Pose exploitable par le moteur" detail={engine.trackingActive ? `${engine.trackingHz.toFixed(1)} échantillons/s` : 'Aucune pose exploitable'} active={engine.trackingActive} preview={preview} />
-            <SignalRow icon={<Radio size={17} />} title="Convolution HRTF" detail={`Matrice dynamique ${engine.inputLayout === '5.1-surround' ? '5 × 2' : '2 × 2'}`} active={engine.connection === 'ready'} preview={preview} />
+            <SignalRow
+              icon={<Radio size={17} />}
+              title="Convolution HRTF"
+              detail={`Matrice dynamique ${windowInput ? `${engine.windowAudio.sourceCount * 2} × 2` : engine.inputLayout === '5.1-surround' ? '5 × 2' : '2 × 2'}`}
+              active={engine.connection === 'ready'}
+              preview={preview}
+            />
             <SignalRow icon={<Gauge size={17} />} title="FIFO & ASRC" detail={`${engine.fifoFillPercent.toFixed(0)} % · ${engine.clockDriftPpm.toFixed(1)} ppm`} active={engine.renderActive} preview={preview} />
+            {windowInputRequested && (
+              <SignalRow
+                icon={<Gauge size={17} />}
+                title="FIFO captures process-loopback"
+                detail={processFifoDetail}
+                active={engine.windowAudio.running && processFifoInterruptions === 0}
+                preview={preview}
+              />
+            )}
             <SignalRow icon={<Headphones size={17} />} title="Rendu casque" detail={engine.physicalOutputName ?? 'Aucune sortie mesurée'} active={engine.renderActive} preview={preview} last />
           </div>
         </section>
@@ -129,11 +165,17 @@ export function DiagnosticsPage() {
           <div className="section-heading-row"><div><span className="eyebrow">TÉLÉMÉTRIE LOCALE</span><h2>Horloges et tampons</h2></div><StatusDot state={engine.xruns ? 'warning' : engine.connection === 'ready' ? 'active' : 'offline'} label={engine.xruns ? `${engine.xruns} xruns` : 'Aucun xrun'} /></div>
           <dl>
             <div><dt>Format de travail</dt><dd>Float32 · {inputLayoutLabel} · {engine.sampleRate / 1000} kHz</dd></div>
+            <div><dt>Mode spatial</dt><dd>{windowInput
+              ? 'Fenêtres · paires L/R'
+              : windowFallback
+                ? 'Fenêtres demandées · repli endpoint'
+                : 'Endpoint · enceintes virtuelles'}</dd></div>
             <div><dt>Capture effective</dt><dd>{engine.captureChannels} canaux · masque {captureMask}</dd></div>
             <div><dt>Sortie WASAPI</dt><dd>{engine.renderSampleFormat === 'pcm-s32' ? 'PCM32 signé' : engine.renderSampleFormat === 'float32' ? 'Float32' : '—'} · stéréo · {engine.sampleRate / 1000} kHz</dd></div>
             <div><dt>Période capture</dt><dd>{engine.capturePeriodMs.toFixed(2)} ms</dd></div>
             <div><dt>Période rendu</dt><dd>{engine.renderPeriodMs.toFixed(2)} ms</dd></div>
             <div><dt>Remplissage FIFO</dt><dd><span className="mini-meter"><i style={{ width: `${engine.fifoFillPercent}%` }} /></span>{engine.fifoFillFrames} frames</dd></div>
+            {windowInputRequested && <div><dt>FIFO process-loopback</dt><dd>{processFifoDetail}</dd></div>}
             <div><dt>Dérive d’horloge</dt><dd>{engine.clockDriftPpm.toFixed(1)} ppm</dd></div>
             <div><dt>Uptime moteur</dt><dd>{formatDuration(engine.uptimeSeconds)}</dd></div>
           </dl>

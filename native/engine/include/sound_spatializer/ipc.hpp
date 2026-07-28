@@ -43,7 +43,14 @@ private:
 class IpcMessageHandler {
 public:
     virtual ~IpcMessageHandler() = default;
-    virtual void on_engine_command(const EngineCommandV1& command) = 0;
+    struct CommandResult {
+        bool accepted{};
+        bool persisted{};
+        std::string error{};
+    };
+
+    [[nodiscard]] virtual CommandResult on_engine_command(
+        const EngineCommandV1& command) = 0;
     virtual void on_head_pose(const HeadPoseSampleV1& pose) = 0;
     virtual void on_ipc_error(std::string_view error) = 0;
 };

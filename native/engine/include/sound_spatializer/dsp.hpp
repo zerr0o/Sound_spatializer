@@ -54,7 +54,10 @@ struct ProgrammeFrame {
 static_assert(sizeof(ProgrammeFrame) == kProgrammeChannelCount * sizeof(float));
 
 struct DirectionalFrame {
-    std::array<float, kDirectionalSourceCount> sources{}; // FL, FR, FC, SL, SR
+    // Endpoint/5.1 mode uses the stable FL, FR, FC, SL, SR mapping at 0..4.
+    // Window mode reserves 0/1 for endpoint fallback and 2..17 for eight
+    // independent application stereo pairs; both modes are mutually exclusive.
+    std::array<float, kMaximumBinauralSources> sources{};
 };
 
 class BypassCrossfade {
@@ -77,11 +80,12 @@ struct HrirFilterBank {
     using Path = std::array<float, kMaximumHrirTaps>;
     std::size_t tap_count{1};
     std::size_t source_count{2};
-    // Index = source * 2 + ear. Five directional sources feed two ears.
-    // The matrix lives on the heap so control/test stacks do not grow by 160 KiB
-    // for every bank. All production banks are constructed before audio starts;
-    // assignment into an equally-sized bank reuses its allocation.
-    std::vector<Path> coefficients = std::vector<Path>(kDirectionalSourceCount * 2);
+    // Index = source * 2 + ear. Up to eighteen paths (the endpoint fallback
+    // plus sixteen application channels) feed two ears. The matrix lives on the
+    // heap so control/test stacks do not grow by 512 KiB for every bank. All
+    // production banks are constructed before audio starts; assignment into an
+    // equally-sized bank reuses its allocation.
+    std::vector<Path> coefficients = std::vector<Path>(kMaximumBinauralSources * 2);
 
     [[nodiscard]] const Path& path(std::size_t source, std::size_t ear) const noexcept {
         return coefficients[source * 2 + ear];
@@ -284,12 +288,22 @@ public:
     [[nodiscard]] std::size_t render(StereoFrame* output, std::size_t frame_count,
                                      float output_sample_rate) noexcept;
     void reset() noexcept;
+    // Producer-side discontinuity marker. The consumer drops all frames older
+    // than the captured FIFO boundary on its next render call.
+    void request_rebase() noexcept;
     void set_nominal_ratio(float input_rate_over_output_rate) noexcept;
     void set_target_fill(std::size_t frames) noexcept { target_fill_frames_ = frames; }
+    void set_startup_fill(std::size_t frames) noexcept { startup_fill_frames_ = frames; }
+    void set_rebase_threshold(std::size_t frames) noexcept {
+        rebase_threshold_frames_ = frames;
+    }
 
     [[nodiscard]] std::size_t fill_frames() const noexcept { return fifo_.size(); }
     [[nodiscard]] std::uint64_t underruns() const noexcept { return underruns_.load(std::memory_order_relaxed); }
     [[nodiscard]] std::uint64_t overruns() const noexcept { return overruns_.load(std::memory_order_relaxed); }
+    [[nodiscard]] std::uint64_t rebases() const noexcept {
+        return rebases_.load(std::memory_order_relaxed);
+    }
     [[nodiscard]] float current_ratio() const noexcept { return current_ratio_.load(std::memory_order_relaxed); }
 
 private:
@@ -306,9 +320,15 @@ private:
     double phase_{};
     float nominal_ratio_{1.0F};
     std::size_t target_fill_frames_{512};
+    std::size_t startup_fill_frames_{};
+    std::size_t rebase_threshold_frames_{};
     bool primed_{};
     std::atomic<std::uint64_t> underruns_{};
     std::atomic<std::uint64_t> overruns_{};
+    std::atomic<std::uint64_t> rebases_{};
+    std::atomic<std::size_t> requested_rebase_boundary_{};
+    std::atomic<std::uint64_t> requested_rebase_revision_{};
+    std::uint64_t applied_rebase_revision_{};
     std::atomic<float> current_ratio_{1.0F};
 };
 

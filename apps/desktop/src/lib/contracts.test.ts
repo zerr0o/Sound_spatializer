@@ -1,17 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { defaultPreferences, defaultScene } from '../data/defaults';
+import { defaultPreferences, defaultScene, defaultWindowSpatialization } from '../data/defaults';
 import type { HeadPoseSampleV1 } from '../types/contracts';
 import type { WireEngineStatusV1, WireSceneConfigV1 } from '../types/wire-contracts';
 import {
   fromWireEngineStatus,
   fromWireSceneConfig,
+  fromWireWindowSpatializationConfig,
   isWireSceneConfigV2,
+  isWireWindowSpatializationConfigV1,
   packHeadPoseV1,
   quaternionToWire,
   migratePersistedConfig,
   toPersistedDesktopConfig,
   toWireEngineCommand,
   toWireSceneConfig,
+  toWireWindowSpatializationConfig,
 } from './contracts';
 
 const legacyWireScene = (): WireSceneConfigV1 => {
@@ -95,10 +98,37 @@ describe('SceneConfigV2 wire', () => {
     expect(restored.captureEndpointId).toBe('external-cable');
   });
 
-  it('persiste uniquement une enveloppe V2', () => {
-    const persisted = toPersistedDesktopConfig({ schemaVersion: 2, scene: defaultScene, preferences: defaultPreferences });
-    expect(persisted.schemaVersion).toBe(2);
+  it('persiste une enveloppe V3 avec la configuration des fenêtres', () => {
+    const persisted = toPersistedDesktopConfig({
+      schemaVersion: 3,
+      scene: defaultScene,
+      preferences: defaultPreferences,
+      windowSpatialization: defaultWindowSpatialization,
+    });
+    expect(persisted.schemaVersion).toBe(3);
     expect(persisted.scene.schemaVersion).toBe(2);
+    expect(persisted.windowSpatialization.schemaVersion).toBe(1);
+  });
+
+  it('désactive un ancien mode fenêtres incompatible avec une scène 5.1', () => {
+    const scene = structuredClone(defaultScene);
+    scene.captureProvider = 'external-render';
+    scene.captureEndpointId = 'capture-5.1';
+    scene.inputLayout = '5.1-surround';
+    const persisted = toPersistedDesktopConfig({
+      schemaVersion: 3,
+      scene,
+      preferences: defaultPreferences,
+      windowSpatialization: {
+        ...structuredClone(defaultWindowSpatialization),
+        enabled: true,
+      },
+    });
+
+    const migrated = migratePersistedConfig(persisted);
+
+    expect(migrated?.scene.inputLayout).toBe('5.1-surround');
+    expect(migrated?.windowSpatialization.enabled).toBe(false);
   });
 
   it('migre une scène V1 vers une scène V2 stéréo avec cinq enceintes bornées', () => {
@@ -106,7 +136,8 @@ describe('SceneConfigV2 wire', () => {
     delete legacy.audio.captureProvider;
     delete legacy.audio.captureEndpointId;
     const migrated = migratePersistedConfig({ schemaVersion: 1, scene: legacy, preferences: {} });
-    expect(migrated?.schemaVersion).toBe(2);
+    expect(migrated?.schemaVersion).toBe(3);
+    expect(migrated?.windowSpatialization).toEqual(defaultWindowSpatialization);
     expect(migrated?.scene.version).toBe(2);
     expect(migrated?.scene.inputLayout).toBe('stereo');
     expect(migrated?.scene.speakers.map((speaker) => speaker.channel)).toEqual(['L', 'R', 'C', 'LS', 'RS']);
@@ -143,6 +174,92 @@ describe('SceneConfigV2 wire', () => {
 });
 
 describe('commandes moteur', () => {
+  it('sérialise la spatialisation stéréo par fenêtres selon le contrat V1', () => {
+    const config = {
+      ...structuredClone(defaultWindowSpatialization),
+      enabled: true,
+      displayCalibrations: [{
+        displayId: 'display-right',
+        center: { x: 0.8, y: 1.2, z: 0.9 },
+        widthM: 0.62,
+        heightM: 0.35,
+        orientation: { x: 0, y: 0.2, z: 0, w: 0.98 },
+      }],
+      sourceRules: [{
+        applicationId: 'player.exe',
+        enabled: true,
+        gainDb: -2,
+        stereoSpread: 0.6,
+        fallbackDisplayId: 'display-right',
+      }],
+    };
+    const wire = toWireWindowSpatializationConfig(config);
+    expect(wire).toMatchObject({
+      schemaVersion: 1,
+      enabled: true,
+      maxSources: 8,
+      displayCalibrations: [{
+        displayId: 'display-right',
+        centerM: [0.8, 1.2, 0.9],
+        orientation: [0.98, 0, 0.2, 0],
+      }],
+    });
+    expect(isWireWindowSpatializationConfigV1(wire)).toBe(true);
+    expect(fromWireWindowSpatializationConfig(wire)).toEqual(config);
+    expect(toWireEngineCommand({
+      version: 1,
+      type: 'set-window-spatialization',
+      config,
+    })).toEqual({
+      schemaVersion: 1,
+      type: 'set-window-spatialization',
+      config: wire,
+    });
+  });
+
+  it('rejette les quaternions d’écran non unitaires et les identifiants dupliqués', () => {
+    const calibration = {
+      displayId: 'display-main',
+      center: { x: 0, y: 1.2, z: 0.9 },
+      widthM: 0.6,
+      heightM: 0.34,
+      orientation: { x: 0, y: 0, z: 0, w: 1 },
+    };
+    const invalidOrientation = toWireWindowSpatializationConfig({
+      ...structuredClone(defaultWindowSpatialization),
+      displayCalibrations: [{
+        ...calibration,
+        orientation: { x: 0, y: 0, z: 0, w: 0 },
+      }],
+    });
+    expect(isWireWindowSpatializationConfigV1(invalidOrientation)).toBe(false);
+
+    const duplicateDisplays = toWireWindowSpatializationConfig({
+      ...structuredClone(defaultWindowSpatialization),
+      displayCalibrations: [
+        calibration,
+        { ...structuredClone(calibration), displayId: 'DISPLAY-MAIN' },
+      ],
+    });
+    expect(isWireWindowSpatializationConfigV1(duplicateDisplays)).toBe(false);
+
+    const sourceRule = {
+      applicationId: 'player.exe',
+      enabled: true,
+      gainDb: 0,
+      stereoSpread: 0.7,
+      fallbackDisplayId: null,
+    };
+    const duplicateRules = toWireWindowSpatializationConfig({
+      ...structuredClone(defaultWindowSpatialization),
+      sourceRules: [
+        sourceRule,
+        { ...structuredClone(sourceRule), applicationId: 'PLAYER.EXE' },
+      ],
+    });
+    expect(isWireWindowSpatializationConfigV1(duplicateRules)).toBe(false);
+  });
+
   it('sérialise calibrate-neutral-pose avec quaternion wxyz', () => {
     expect(toWireEngineCommand({
       version: 1,
@@ -298,8 +415,107 @@ describe('EngineStatusV1 wire', () => {
     };
     expect(fromWireEngineStatus(wire)).toMatchObject({
       inputLayout: 'stereo',
+      spatialInputMode: 'endpoint-mix',
       captureChannels: 2,
       captureChannelMask: 0x3,
+      windowAudio: {
+        supported: false,
+        running: false,
+        fifoOverruns: 0,
+        fifoUnderruns: 0,
+        displays: [],
+        windowSources: [],
+      },
+    });
+  });
+
+  it('adapte la télémétrie optionnelle des écrans et sources L/R', async () => {
+    const wire: WireEngineStatusV1 = {
+      schemaVersion: 1,
+      audioMode: 'shared-low-latency',
+      spatialInputMode: 'process-windows',
+      requestedSpatialInputMode: 'process-windows',
+      captureState: 'running', renderState: 'running', trackingState: 'tracking',
+      captureSampleRate: 48_000, renderSampleRate: 48_000,
+      capturePeriodFrames: 128, renderPeriodFrames: 128, fifoFillFrames: 256,
+      xruns: 0, callbackCpuPercent: 10, trackingHz: 60,
+      latencyP50Ms: 10, latencyP95Ms: 15, resampleRatio: 1,
+      potentiallyBinaural: false, lastError: '',
+      windowAudio: {
+        supported: true,
+        running: true,
+        sourceCount: 1,
+        sequence: 3,
+        diagnostics: { fifoOverruns: 3, fifoUnderruns: 5, lastError: '' },
+        displays: [{
+          id: 'right',
+          name: 'Écran droit',
+          isPrimary: false,
+          boundsPx: { left: 1920, top: 0, right: 3840, bottom: 1080 },
+          centerM: [0.8, 1.2, 0.9],
+          widthM: 0.6,
+          heightM: 0.34,
+          orientation: [1, 0, 0, 0],
+        }],
+        windowSources: [{
+          sourceId: 'source-1',
+          applicationId: 'player.exe',
+          applicationName: 'Lecteur',
+          windowTitle: 'Musique',
+          processId: 42,
+          displayId: 'right',
+          active: true,
+          leftPositionM: [0.6, 1.2, 0.9],
+          rightPositionM: [1, 1.2, 0.9],
+          gainDb: 0,
+          sampleRate: 48_000,
+          channelCount: 2,
+          captureState: 'capturing',
+        }],
+      },
+    };
+    const { isWireEngineStatusV1 } = await import('./contracts');
+    expect(isWireEngineStatusV1(wire)).toBe(true);
+    expect(fromWireEngineStatus(wire)).toMatchObject({
+      spatialInputMode: 'process-windows',
+      requestedSpatialInputMode: 'process-windows',
+      windowAudio: {
+        supported: true,
+        running: true,
+        sourceCount: 1,
+        fifoOverruns: 3,
+        fifoUnderruns: 5,
+        displays: [{ center: { x: 0.8, y: 1.2, z: 0.9 } }],
+        windowSources: [{
+          applicationId: 'player.exe',
+          leftPosition: { x: 0.6, y: 1.2, z: 0.9 },
+          rightPosition: { x: 1, y: 1.2, z: 0.9 },
+        }],
+      },
+    });
+
+    const invalidCounters = structuredClone(wire);
+    invalidCounters.windowAudio!.diagnostics.fifoUnderruns = -1;
+    expect(isWireEngineStatusV1(invalidCounters)).toBe(false);
+  });
+
+  it('distingue le mode fenêtres demandé du repli endpoint effectif', () => {
+    const wire: WireEngineStatusV1 = {
+      schemaVersion: 1,
+      audioMode: 'shared-low-latency',
+      spatialInputMode: 'endpoint-mix',
+      requestedSpatialInputMode: 'process-windows',
+      captureState: 'running', renderState: 'running', trackingState: 'tracking',
+      captureSampleRate: 48_000, renderSampleRate: 48_000,
+      capturePeriodFrames: 128, renderPeriodFrames: 128, fifoFillFrames: 256,
+      xruns: 0, callbackCpuPercent: 10, trackingHz: 60,
+      latencyP50Ms: 10, latencyP95Ms: 15, resampleRatio: 1,
+      potentiallyBinaural: false, lastError: '',
+    };
+
+    expect(fromWireEngineStatus(wire)).toMatchObject({
+      spatialInputMode: 'endpoint-mix',
+      requestedSpatialInputMode: 'process-windows',
     });
   });
 

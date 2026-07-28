@@ -1,4 +1,10 @@
-import type { AppPreferences, AudioMode, CaptureProvider, InputLayout } from './contracts';
+import type {
+  AppPreferences,
+  AudioMode,
+  CaptureProvider,
+  InputLayout,
+  SpatialInputMode,
+} from './contracts';
 
 export type WireVec3 = [number, number, number];
 export type WireQuaternionWxyz = [number, number, number, number];
@@ -108,19 +114,102 @@ export interface PersistedDesktopConfigV2 {
   preferences: AppPreferences;
 }
 
+export interface WireDisplaySpatialCalibration {
+  displayId: string;
+  centerM: WireVec3;
+  widthM: number;
+  heightM: number;
+  orientation: WireQuaternionWxyz;
+}
+
+export interface WireWindowSourceRule {
+  applicationId: string;
+  enabled: boolean;
+  gainDb: number;
+  stereoSpread: number;
+  fallbackDisplayId: string | null;
+}
+
+/** Représentation exacte de contracts/window-spatialization-v1.schema.json. */
+export interface WireWindowSpatializationConfigV1 {
+  schemaVersion: 1;
+  enabled: boolean;
+  maxSources: number;
+  stereoSpread: number;
+  followWindowPosition: boolean;
+  displayCalibrations: WireDisplaySpatialCalibration[];
+  sourceRules: WireWindowSourceRule[];
+}
+
+export interface PersistedDesktopConfigV3 {
+  schemaVersion: 3;
+  scene: WireSceneConfigV2;
+  preferences: AppPreferences;
+  windowSpatialization: WireWindowSpatializationConfigV1;
+}
+
 export type WireStreamState = 'stopped' | 'starting' | 'running' | 'degraded' | 'failed';
 export type WireTrackingState = 'lost' | 'tracking' | 'held' | 'returning-to-neutral';
 export type WireAudioSampleFormat = 'unknown' | 'float32' | 'pcm-s32';
 
+export interface WireDisplayRuntimeInfo {
+  id: string;
+  name: string;
+  isPrimary: boolean;
+  boundsPx: { left: number; top: number; right: number; bottom: number };
+  centerM: WireVec3;
+  widthM: number;
+  heightM: number;
+  orientation: WireQuaternionWxyz;
+}
+
+export interface WireWindowAudioSourceInfo {
+  sourceId: string;
+  applicationId: string;
+  applicationName: string;
+  windowTitle: string;
+  processId: number;
+  displayId: string;
+  active: boolean;
+  leftPositionM: WireVec3;
+  rightPositionM: WireVec3;
+  gainDb: number;
+  sampleRate: number;
+  channelCount: number;
+  captureState: 'inactive' | 'activating' | 'capturing' | 'unsupported-format' | 'failed';
+}
+
 export interface WireEngineStatusV1 {
   schemaVersion: 1;
+  /** Added by the desktop host, not serialized by the native engine. */
+  desktopConnectionGeneration?: number;
   audioMode: AudioMode;
   /** Optional during a rolling upgrade from engines predating PCM32 telemetry. */
   renderSampleFormat?: WireAudioSampleFormat;
   /** Optional while interoperating with an engine predating multichannel capture. */
   inputLayout?: InputLayout;
+  /** Optional while interoperating with an engine predating per-process capture. */
+  spatialInputMode?: SpatialInputMode;
+  /** Requested mode, distinct from the effective endpoint fallback. */
+  requestedSpatialInputMode?: SpatialInputMode;
   captureChannels?: number;
   captureChannelMask?: number;
+  windowAudio?: {
+    supported: boolean;
+    running: boolean;
+    sourceCount: number;
+    sequence: number;
+    displays: WireDisplayRuntimeInfo[];
+    windowSources: WireWindowAudioSourceInfo[];
+    diagnostics: {
+      discoveryPasses?: number;
+      sessionsSeen?: number;
+      captureStartFailures?: number;
+      fifoOverruns?: number;
+      fifoUnderruns?: number;
+      lastError: string;
+    };
+  };
   captureState: WireStreamState;
   renderState: WireStreamState;
   trackingState: WireTrackingState;

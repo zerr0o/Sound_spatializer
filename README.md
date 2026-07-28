@@ -50,8 +50,12 @@ Les dépendances principales et obligations de notice sont recensées dans
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Le propriétaire du projet doit
 encore choisir la licence du code original avant toute distribution externe.
 
-L'aperçu web se lance avec `pnpm dev`. L'application native avec rechargement à
-chaud se lance avec `pnpm --dir apps/desktop tauri dev`. `pnpm build:ui` produit
+L'aperçu web se lance avec `pnpm dev`. Pour une première exécution native (ou
+après une modification C++), construisez le moteur Debug complet avec
+`pnpm build:engine:debug`, puis lancez le rechargement à chaud avec
+`pnpm --dir apps/desktop tauri dev`. En mode Debug, l'hôte préfère ce moteur du
+workspace à une ancienne copie éventuellement présente dans `target/debug`.
+`pnpm build:ui` produit
 le véritable exécutable Tauri Release et vérifie qu'il n'embarque pas l'URL du
 serveur de développement. Ne pas le remplacer par un `cargo build --release`,
 qui ne sélectionne pas à lui seul le protocole Tauri de production. La
@@ -75,6 +79,17 @@ L'entrée 5.1 utilise ce chemin externe et exige un endpoint Windows configuré
 en six canaux ; le pilote natif reste stéréo. Les cinq canaux principaux sont
 spatialisés comme des enceintes L/R/C/LS/RS, tandis que le LFE reste
 non directionnel. Voir [la configuration et le test du surround](docs/SURROUND_5_1.md).
+
+Le mode **Fenêtres** est une alternative stéréo : il capture séparément jusqu'à
+huit sessions audio, dédupliquées par arbre de processus, et place pour chacune
+deux émetteurs L/R sur la largeur de la fenêtre Windows associée. Une ligne
+présentée sous le nom d'une application peut donc inclure ses sous-processus
+audio. Le mode nécessite le même routage vers un endpoint virtuel afin d'éviter
+que le son direct se superpose au rendu binaural. Si une session active ne peut
+pas être séparée (son système, neuvième source, capture en échec), le mix global
+complet reste audible et la spatialisation par fenêtres attend une couverture
+complète. Voir
+[la configuration de la spatialisation par fenêtres](docs/WINDOW_SPATIALIZATION.md).
 
 ## Sécurité et confidentialité
 

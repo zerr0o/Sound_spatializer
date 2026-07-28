@@ -21,7 +21,19 @@ inline constexpr std::size_t kTimeDomainHrirTaps = 512;
 inline constexpr std::size_t kMaximumHrirTaps = 4'096;
 inline constexpr std::size_t kMaximumEqSections = 16;
 inline constexpr std::size_t kProgrammeChannelCount = 6;
+// The room/5.1 scene keeps five physical directional speakers, while the
+// binaural renderer can host eight independent stereo application streams.
 inline constexpr std::size_t kDirectionalSourceCount = 5;
+// The endpoint permanently owns 0/1. Eight window applications retain sixteen
+// stable stereo indices at 2..17. Keeping the transports disjoint makes either
+// HRTF bank able to render the endpoint during an asynchronous handoff.
+inline constexpr std::size_t kMaximumWindowBinauralSources = 16;
+inline constexpr std::size_t kEndpointFallbackLeftSource = 0;
+inline constexpr std::size_t kEndpointFallbackRightSource = 1;
+inline constexpr std::size_t kFirstWindowBinauralSource = 2;
+inline constexpr std::size_t kMaximumBinauralSources = 18;
+
+static_assert(kDirectionalSourceCount <= kMaximumBinauralSources);
 
 enum class TrackingState : std::uint32_t {
     unavailable = 0,
@@ -209,10 +221,14 @@ enum class EngineCommandType : std::uint32_t {
     set_hrtf,
     set_headphone_eq,
     set_audio_route,
+    set_window_spatialization,
 };
 
 struct EngineCommandV1 {
     std::uint32_t schema_version{1};
+    // Assigned by the desktop bridge. Zero keeps compatibility with local
+    // callers that do not need an acknowledgement.
+    std::uint32_t command_id{};
     EngineCommandType type{EngineCommandType::start};
     bool bool_value{};
     std::string string_value{};
@@ -255,6 +271,12 @@ struct EngineStatusV1 {
     float latency_p95_ms{};
     float current_resample_ratio{1.0F};
     bool potentially_binaural{};
+    // Requested mode is configuration state; rendering is the path used by
+    // the latest real-time callback after process-loopback readiness checks.
+    bool window_audio_enabled{};
+    bool window_audio_rendering{};
+    std::uint32_t window_audio_source_count{};
+    std::string window_audio_json{};
     std::string last_error{};
 };
 

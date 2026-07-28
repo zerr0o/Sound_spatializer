@@ -55,12 +55,32 @@ namespace {
 
 } // namespace
 
-SpatialAudioEngine::SpatialAudioEngine() : SpatialAudioEngine(create_system_audio_backend()) {}
+SpatialAudioEngine::SpatialAudioEngine()
+    : SpatialAudioEngine(create_system_audio_backend(), make_window_audio_capture()) {}
 
-SpatialAudioEngine::SpatialAudioEngine(std::unique_ptr<IAudioBackend> backend) : backend_(std::move(backend)) {
+SpatialAudioEngine::SpatialAudioEngine(std::unique_ptr<IAudioBackend> backend)
+    : SpatialAudioEngine(std::move(backend), make_window_audio_capture()) {}
+
+SpatialAudioEngine::SpatialAudioEngine(
+    std::unique_ptr<IAudioBackend> backend,
+    std::unique_ptr<IWindowAudioCapture> window_audio_capture)
+    : SpatialAudioEngine(std::move(backend), std::move(window_audio_capture),
+                         std::make_unique<AnalyticHrtfDatabase>(kSampleRate)) {}
+
+SpatialAudioEngine::SpatialAudioEngine(
+    std::unique_ptr<IAudioBackend> backend,
+    std::unique_ptr<IWindowAudioCapture> window_audio_capture,
+    std::unique_ptr<IHrtfDatabase> builtin_hrtf)
+    : backend_(std::move(backend)),
+      window_audio_capture_(std::move(window_audio_capture)) {
     if (!backend_)
         backend_ = std::make_unique<MockAudioBackend>();
-    hrtf_lifetime_.push_back(std::make_unique<AnalyticHrtfDatabase>(kSampleRate));
+    if (!window_audio_capture_)
+        window_audio_capture_ = make_window_audio_capture();
+    if (!builtin_hrtf)
+        builtin_hrtf =
+            std::make_unique<AnalyticHrtfDatabase>(kSampleRate);
+    hrtf_lifetime_.push_back(std::move(builtin_hrtf));
     limiter_.prepare(static_cast<float>(kSampleRate));
     limiter_.set_ceiling_db(-0.1F);
     lfe_renderer_.prepare(static_cast<float>(kSampleRate));
@@ -163,6 +183,12 @@ bool SpatialAudioEngine::prepare_scene(const SceneConfigV2& scene, PreparedScene
 
 bool SpatialAudioEngine::set_scene(const SceneConfigV2& scene, std::string& error) {
     std::scoped_lock lock(control_mutex_);
+    if (window_audio_config_.enabled &&
+        scene.audio.input_layout != InputLayout::stereo) {
+        error =
+            "the 5.1 input layout cannot be enabled while window spatialization is active";
+        return false;
+    }
     if (backend_->running() && scene.audio.input_layout != scene_.audio.input_layout) {
         error = "input layout changes require an audio backend restart";
         return false;
@@ -194,6 +220,98 @@ SceneConfigV2 SpatialAudioEngine::scene() const {
     return scene_;
 }
 
+bool SpatialAudioEngine::set_window_spatialization(const WindowAudioConfig& config,
+                                                   std::string& error) {
+    if (!validate_window_audio_config(config, error))
+        return false;
+
+    WindowAudioConfig previous{};
+    WindowAudioConfig previous_runtime{};
+    WindowAudioConfig runtime = config;
+    const AudioBackendDiagnostics backend_diagnostics = backend_->diagnostics();
+    bool audio_running = false;
+    {
+        std::scoped_lock lock(control_mutex_);
+        if (config.enabled && scene_.audio.input_layout != InputLayout::stereo) {
+            error = "window spatialization requires the stereo input layout";
+            return false;
+        }
+        previous = window_audio_config_;
+        previous_runtime = previous;
+        runtime.discovery_endpoint_id =
+            !backend_diagnostics.capture_endpoint_id.empty()
+                ? backend_diagnostics.capture_endpoint_id
+                : scene_.audio.capture_endpoint_id.value_or("");
+        runtime.listener_position_m = scene_.listener.position_m;
+        previous_runtime.discovery_endpoint_id =
+            runtime.discovery_endpoint_id;
+        previous_runtime.listener_position_m = runtime.listener_position_m;
+#if defined(_WIN32)
+        runtime.excluded_process_id = GetCurrentProcessId();
+        previous_runtime.excluded_process_id = runtime.excluded_process_id;
+#else
+        runtime.excluded_process_id = 0;
+        previous_runtime.excluded_process_id = 0;
+#endif
+        audio_running = backend_->running();
+    }
+
+    if (audio_running) {
+        if (!config.enabled) {
+            window_audio_requested_.store(false, std::memory_order_release);
+            window_audio_rendering_status_.store(false,
+                                                 std::memory_order_release);
+            window_audio_capture_->stop();
+        } else {
+            const bool applied_live =
+                previous.enabled && window_audio_capture_->running() &&
+                window_audio_capture_->reconfigure(runtime);
+            if (!applied_live) {
+                window_audio_requested_.store(false, std::memory_order_release);
+                window_audio_rendering_status_.store(
+                    false, std::memory_order_release);
+                window_audio_capture_->stop();
+                if (!window_audio_capture_->start(runtime)) {
+                    const WindowAudioDiagnostics diagnostics =
+                        window_audio_capture_->diagnostics();
+                    const auto diagnostic_text = [&diagnostics] {
+                        const auto end = std::find(
+                            diagnostics.last_error.begin(),
+                            diagnostics.last_error.end(), '\0');
+                        return std::string(diagnostics.last_error.begin(), end);
+                    }();
+
+                    if (previous.enabled &&
+                        window_audio_capture_->start(previous_runtime)) {
+                        window_audio_requested_.store(
+                            true, std::memory_order_release);
+                    }
+                    error =
+                        diagnostic_text.empty()
+                            ? "window process-loopback capture could not start"
+                            : "window process-loopback capture could not start: " +
+                                  diagnostic_text;
+                    return false;
+                }
+            }
+        }
+    }
+
+    {
+        std::scoped_lock lock(control_mutex_);
+        window_audio_config_ = config;
+    }
+    window_audio_requested_.store(config.enabled && audio_running,
+                                  std::memory_order_release);
+    error.clear();
+    return true;
+}
+
+WindowAudioConfig SpatialAudioEngine::window_spatialization() const {
+    std::scoped_lock lock(control_mutex_);
+    return window_audio_config_;
+}
+
 void SpatialAudioEngine::submit_head_pose(const HeadPoseSampleV1& pose) noexcept { pose_mailbox_.store(pose); }
 
 void SpatialAudioEngine::set_virtual_endpoint_id(std::string endpoint_id) {
@@ -203,6 +321,7 @@ void SpatialAudioEngine::set_virtual_endpoint_id(std::string endpoint_id) {
 
 bool SpatialAudioEngine::start_audio(std::string& error) {
     AudioBackendConfig config{};
+    WindowAudioConfig window_config{};
     const bool was_already_running = backend_->running();
     {
         // Device activation can cross the COM/RPC boundary and must never hold
@@ -223,7 +342,51 @@ bool SpatialAudioEngine::start_audio(std::string& error) {
         config.input_layout = scene_.audio.input_layout;
         config.mode = scene_.audio.mode;
         config.requested_buffer_frames = scene_.audio.buffer_frames;
+        window_config = window_audio_config_;
+        window_config.discovery_endpoint_id = config.capture_endpoint_id;
+        window_config.listener_position_m = scene_.listener.position_m;
+#if defined(_WIN32)
+        window_config.excluded_process_id = GetCurrentProcessId();
+#endif
     }
+    const auto start_window_capture = [this, &window_config, &error]() {
+        if (!window_config.enabled) {
+            window_audio_capture_->stop();
+            window_audio_requested_.store(false, std::memory_order_release);
+            window_audio_rendering_status_.store(false,
+                                                 std::memory_order_release);
+            return true;
+        }
+        if (window_audio_capture_->running()) {
+            window_audio_requested_.store(true, std::memory_order_release);
+            return true;
+        }
+        window_config.discovery_endpoint_id =
+            backend_->diagnostics().capture_endpoint_id;
+        if (window_config.discovery_endpoint_id.empty()) {
+            error =
+                "window process-loopback capture cannot resolve the active "
+                "capture render endpoint";
+            window_audio_requested_.store(false, std::memory_order_release);
+            window_audio_rendering_status_.store(false,
+                                                 std::memory_order_release);
+            return false;
+        }
+        if (window_audio_capture_->start(window_config)) {
+            window_audio_requested_.store(true, std::memory_order_release);
+            return true;
+        }
+        const WindowAudioDiagnostics diagnostics = window_audio_capture_->diagnostics();
+        const auto end =
+            std::find(diagnostics.last_error.begin(), diagnostics.last_error.end(), '\0');
+        const std::string detail(diagnostics.last_error.begin(), end);
+        error = detail.empty() ? "window process-loopback capture could not start"
+                               : "window process-loopback capture could not start: " + detail;
+        window_audio_requested_.store(false, std::memory_order_release);
+        window_audio_rendering_status_.store(false,
+                                             std::memory_order_release);
+        return false;
+    };
     if (backend_->start(config, *this, error)) {
         // A repeated `start` is intentionally idempotent. In particular, the
         // desktop bootstrap can issue it immediately after a route command
@@ -233,6 +396,12 @@ bool SpatialAudioEngine::start_audio(std::string& error) {
             std::scoped_lock lock(control_mutex_);
             effective_audio_mode_ = config.mode;
             audio_mode_warning_.clear();
+        }
+        if (!start_window_capture()) {
+            backend_->stop();
+            std::scoped_lock lock(control_mutex_);
+            effective_audio_mode_.reset();
+            return false;
         }
         return true;
     }
@@ -258,6 +427,14 @@ bool SpatialAudioEngine::start_audio(std::string& error) {
     if (!backend_->start(config, *this, fallback_error)) {
         error = "exclusive Pro mode failed: " + exclusive_error +
                 "; shared low-latency fallback failed: " + fallback_error;
+        return false;
+    }
+    if (!start_window_capture()) {
+        backend_->stop();
+        {
+            std::scoped_lock lock(control_mutex_);
+            effective_audio_mode_.reset();
+        }
         return false;
     }
     {
@@ -287,6 +464,9 @@ bool SpatialAudioEngine::start_audio(std::string& error) {
 }
 
 void SpatialAudioEngine::stop_audio() noexcept {
+    window_audio_requested_.store(false, std::memory_order_release);
+    window_audio_rendering_status_.store(false, std::memory_order_release);
+    window_audio_capture_->stop();
     backend_->stop();
     std::scoped_lock lock(control_mutex_);
     effective_audio_mode_.reset();
@@ -418,6 +598,15 @@ bool SpatialAudioEngine::execute_command(const EngineCommandV1& command, std::st
             error += "; previous route restoration failed: " + restore_error;
         return false;
     }
+    case EngineCommandType::set_window_spatialization: {
+        const ParseResult<WindowAudioConfig> parsed =
+            window_audio_config_from_json(command.string_value);
+        if (!parsed) {
+            error = parsed.error;
+            return false;
+        }
+        return set_window_spatialization(*parsed.value, error);
+    }
     }
     error = "unsupported engine command";
     return false;
@@ -485,13 +674,52 @@ void SpatialAudioEngine::request_hrtf_for_pose(const Quaternionf& orientation) n
     request.generation = ++hrtf_request_generation_;
     request.scene_revision = active_scene_revision_;
     request.database = active_scene_.hrtf;
-    request.speaker_gains = active_scene_.speaker_gains;
-    request.source_count = active_scene_.source_count;
     request.world_to_head = world_to_head;
-    request.room_enabled = active_scene_.room_enabled;
-    for (std::size_t index = 0; index < active_scene_.source_count; ++index) {
-        const Vec3f world_direction = active_scene_.speaker_positions[index] - active_scene_.listener_position;
-        request.head_relative_directions[index] = rotate(world_to_head, world_direction);
+    if (active_window_audio_rendering_) {
+        // Keep sparse slot indices stable, but do not make the real-time
+        // convolver visit the unused tail up to the eight-application ceiling.
+        // The permanent endpoint fallback occupies 0/1; the highest active
+        // process slot determines the smallest safe bank above that.
+        request.source_count =
+            std::max<std::size_t>(2U, active_window_source_count_);
+        request.room_enabled = false;
+        std::copy(active_window_gains_.begin(), active_window_gains_.end(),
+                  request.speaker_gains.begin());
+        for (std::size_t index = kFirstWindowBinauralSource;
+             index < active_window_source_count_; ++index) {
+            const Vec3f world_direction =
+                active_window_positions_[index] - active_scene_.listener_position;
+            request.head_relative_directions[index] =
+                rotate(world_to_head, world_direction);
+        }
+        // Preserve the endpoint at permanent indices 0/1 inside every window
+        // bank. Application holes at 2..17 remain true null HRIRs.
+        request.speaker_gains[kEndpointFallbackLeftSource] =
+            active_scene_.speaker_gains[0];
+        request.speaker_gains[kEndpointFallbackRightSource] =
+            active_scene_.speaker_gains[1];
+        request.head_relative_directions[kEndpointFallbackLeftSource] =
+            rotate(world_to_head,
+                   active_scene_.speaker_positions[0] -
+                       active_scene_.listener_position);
+        request.head_relative_directions[kEndpointFallbackRightSource] =
+            rotate(world_to_head,
+                   active_scene_.speaker_positions[1] -
+                       active_scene_.listener_position);
+    } else {
+        std::copy(active_scene_.speaker_gains.begin(),
+                  active_scene_.speaker_gains.end(),
+                  request.speaker_gains.begin());
+        request.source_count = active_scene_.source_count;
+        request.room_enabled =
+            active_scene_.room_enabled && !active_window_audio_enabled_;
+        for (std::size_t index = 0; index < active_scene_.source_count; ++index) {
+            const Vec3f world_direction =
+                active_scene_.speaker_positions[index] -
+                active_scene_.listener_position;
+            request.head_relative_directions[index] =
+                rotate(world_to_head, world_direction);
+        }
     }
     hrtf_worker_.submit_latest(request);
     last_requested_filter_orientation_ = normalized_orientation;
@@ -505,7 +733,13 @@ void SpatialAudioEngine::consume_prepared_hrtf() noexcept {
         if (direct->valid && direct->scene_revision == active_scene_revision_) {
             const bool first_filters_for_scene = direct->scene_revision != filter_scene_revision_;
             std::uint32_t morph_frames = 0;
-            if (filters_initialized_) {
+            if (first_filters_for_scene &&
+                window_filter_handoff_waiting_) {
+                // Both transport directions are guarded by an explicitly
+                // renderable endpoint path. Keep their filter morph on the same
+                // bounded horizon as the PCM transport fade.
+                morph_frames = kWindowTransportCrossfadeFrames;
+            } else if (filters_initialized_) {
                 if (first_filters_for_scene) {
                     morph_frames = 4'800U;
                 } else if (scene_filter_transition_active_) {
@@ -571,22 +805,182 @@ void SpatialAudioEngine::reset_latency_diagnostics() noexcept {
 
 void SpatialAudioEngine::process_chunk(const ProgrammeFrame* input, StereoFrame* output, std::size_t frame_count,
                                        double render_time_seconds) noexcept {
-    for (std::size_t index = 0; index < frame_count; ++index) {
-        const ProgrammeFrame& programme = input[index];
-        DirectionalFrame& directional = directional_input_[index];
-        directional.sources = {
-            programme.front_left,
-            programme.front_right,
-            active_scene_.source_count > 2 ? programme.front_center : 0.0F,
-            active_scene_.source_count > 2 ? programme.surround_left : 0.0F,
-            active_scene_.source_count > 2 ? programme.surround_right : 0.0F,
-        };
-        const float lfe = active_scene_.source_count > 2 ? programme.lfe : 0.0F;
-        lfe_bed_[index] = lfe_renderer_.process_sample(lfe);
-        bypass_dry_[index] = downmix_programme_to_stereo(programme, lfe_bed_[index]);
-        detector_input_[index] = {programme.front_left, programme.front_right};
+    bool render_window_audio = false;
+    std::size_t active_window_application_count = 0;
+    bool window_topology_changed = false;
+    bool window_filter_parameters_changed = false;
+    const bool previous_window_audio_rendering =
+        active_window_audio_rendering_;
+    const bool previous_handoff_waiting =
+        window_filter_handoff_waiting_;
+    if (active_window_audio_enabled_) {
+        const WindowAudioRealtimeSnapshot realtime =
+            window_audio_capture_->realtime_snapshot();
+        const std::size_t application_count =
+            std::min(realtime.count, kMaximumWindowAudioApplications);
+        for (std::size_t frame = 0; frame < frame_count; ++frame) {
+            directional_input_[frame].sources.fill(0.0F);
+            bypass_dry_[frame] = {};
+            detector_input_[frame] = {};
+            lfe_bed_[frame] = 0.0F;
+        }
+
+        const std::size_t previous_source_count = active_window_source_count_;
+        const auto previous_positions = active_window_positions_;
+        const auto previous_gains = active_window_gains_;
+        const auto previous_handles = active_window_handles_;
+        active_window_source_count_ = 0;
+        active_window_positions_.fill(Vec3f{});
+        active_window_gains_.fill(0.0F);
+        active_window_handles_.fill(WindowAudioSlotHandle{});
+
+        for (std::size_t application = 0; application < application_count; ++application) {
+            const WindowAudioSlotHandle handle = realtime.handles[application];
+            if (!handle.valid()) continue;
+            const std::size_t slot = handle.slot;
+            std::fill_n(window_source_input_[slot].data(), frame_count,
+                        StereoFrame{});
+            const WindowAudioPullResult pulled =
+                window_audio_capture_->pull(handle, window_source_input_[slot].data(),
+                                            frame_count);
+            // `capturing` is published before the first process-loopback packet
+            // arrives. Keep the endpoint fallback until the ASRC can supply a
+            // complete first block. After that first block, a transient
+            // underrun is an audio dropout, not a topology mutation: retain
+            // the stable handle and let the missing tail remain silent.
+            if (!pulled.active) {
+                if (primed_window_handles_[slot] == handle)
+                    primed_window_handles_[slot] =
+                        WindowAudioSlotHandle{};
+                continue;
+            }
+            if (primed_window_handles_[slot] != handle) {
+                if (pulled.received_frames != frame_count) continue;
+                primed_window_handles_[slot] = handle;
+            }
+
+            // A process capture slot owns a stable HRTF pair. Never compact
+            // indices when a lower slot disappears: doing so would feed an
+            // application through another application's still-active filters
+            // while the asynchronous replacement bank is prepared.
+            const std::size_t left_source =
+                kFirstWindowBinauralSource + slot * 2U;
+            const std::size_t right_source = left_source + 1U;
+            if (right_source >= kMaximumBinauralSources) continue;
+            active_window_handles_[slot] = handle;
+            active_window_positions_[left_source] =
+                pulled.placement.left_position_m;
+            active_window_positions_[right_source] =
+                pulled.placement.right_position_m;
+            active_window_gains_[left_source] = pulled.placement.gain_linear;
+            active_window_gains_[right_source] = pulled.placement.gain_linear;
+            ++active_window_application_count;
+
+            for (std::size_t frame = 0; frame < frame_count; ++frame) {
+                const StereoFrame source = window_source_input_[slot][frame];
+                directional_input_[frame].sources[left_source] = source.left;
+                directional_input_[frame].sources[right_source] = source.right;
+                bypass_dry_[frame].left +=
+                    source.left * pulled.placement.gain_linear;
+                bypass_dry_[frame].right +=
+                    source.right * pulled.placement.gain_linear;
+            }
+            active_window_source_count_ =
+                std::max(active_window_source_count_, right_source + 1U);
+        }
+
+        // Process-loopback is all-or-nothing. The endpoint mix contains every
+        // application, so partially replacing it would either mute an
+        // uncovered session or duplicate the covered sessions. Continue
+        // pulling every slot above to drain/prime its FIFO, but only hand over
+        // once discovery confirms complete active-session coverage.
+        // Re-snapshot after draining every process FIFO. A capture thread can
+        // revoke coverage between the initial snapshot and its pull; that veto
+        // must restore the endpoint in this callback rather than one callback
+        // later.
+        const WindowAudioRealtimeSnapshot post_pull_realtime =
+            window_audio_capture_->realtime_snapshot();
+        render_window_audio =
+            realtime.sequence == post_pull_realtime.sequence &&
+            post_pull_realtime.coverage_complete &&
+            !post_pull_realtime.endpoint_fallback_requested &&
+            active_window_application_count ==
+                post_pull_realtime.required_active_captures &&
+            active_window_application_count != 0U &&
+            active_window_source_count_ != 0U;
+        if (render_window_audio) {
+            window_topology_changed =
+                previous_source_count != active_window_source_count_;
+            for (std::size_t slot = 0;
+                 !window_topology_changed &&
+                 slot < active_window_handles_.size();
+                 ++slot) {
+                window_topology_changed =
+                    active_window_handles_[slot] != previous_handles[slot];
+            }
+            for (std::size_t source = 0;
+                 !window_filter_parameters_changed &&
+                 source < active_window_source_count_;
+                 ++source) {
+                const Vec3f delta =
+                    active_window_positions_[source] - previous_positions[source];
+                window_filter_parameters_changed =
+                    length(delta) > 0.001F ||
+                    std::abs(active_window_gains_[source] -
+                             previous_gains[source]) > 0.0001F;
+            }
+            filter_request_dirty_ = filter_request_dirty_ ||
+                                    window_topology_changed ||
+                                    window_filter_parameters_changed;
+        }
     }
-    const StereoFrame* dry_input = bypass_dry_.data();
+
+    const bool window_rendering_changed =
+        render_window_audio != active_window_audio_rendering_;
+    if (window_rendering_changed ||
+        (render_window_audio && window_topology_changed)) {
+        const bool returning_to_endpoint =
+            previous_window_audio_rendering && !previous_handoff_waiting;
+        if (returning_to_endpoint && last_output_frame_valid_) {
+            // The old process stream may have disappeared already (capture
+            // failure, route change, explicit disable). A zero-latency
+            // de-click therefore bridges from the last sample actually sent
+            // to the new endpoint path instead of pretending future process
+            // PCM is still available.
+            window_output_declick_hold_ = last_output_frame_;
+            window_output_declick_remaining_ =
+                kWindowTransportCrossfadeFrames;
+        }
+        active_window_audio_rendering_ = render_window_audio;
+        window_transport_crossfade_remaining_ = 0U;
+        ++active_scene_revision_;
+        window_filter_handoff_waiting_ = true;
+        window_filter_handoff_revision_ = active_scene_revision_;
+        filter_request_dirty_ = true;
+        binaural_detector_.reset();
+        potentially_binaural_.store(false, std::memory_order_relaxed);
+    }
+
+    if (!render_window_audio) {
+        for (std::size_t index = 0; index < frame_count; ++index) {
+            const ProgrammeFrame& programme = input[index];
+            DirectionalFrame& directional = directional_input_[index];
+            directional.sources = {
+                programme.front_left,
+                programme.front_right,
+                active_scene_.source_count > 2 ? programme.front_center : 0.0F,
+                active_scene_.source_count > 2 ? programme.surround_left : 0.0F,
+                active_scene_.source_count > 2 ? programme.surround_right : 0.0F,
+            };
+            const float lfe =
+                active_scene_.source_count > 2 ? programme.lfe : 0.0F;
+            lfe_bed_[index] = lfe_renderer_.process_sample(lfe);
+            bypass_dry_[index] =
+                downmix_programme_to_stereo(programme, lfe_bed_[index]);
+            detector_input_[index] = {programme.front_left,
+                                      programme.front_right};
+        }
+    }
     const HeadPoseSampleV1 raw_pose = pose_mailbox_.load();
     HeadPoseSampleV1 rendered_pose{};
     if (raw_pose.sequence != last_pose_sequence_) {
@@ -625,7 +1019,82 @@ void SpatialAudioEngine::process_chunk(const ProgrammeFrame* input, StereoFrame*
     tracking_state_.store(static_cast<std::uint32_t>(rendered_pose.tracking_state), std::memory_order_relaxed);
     request_hrtf_for_pose(rendered_pose.orientation);
     consume_prepared_hrtf();
-    if (active_scene_.source_count == 2) {
+
+    if (window_filter_handoff_waiting_ && filters_initialized_ &&
+        filter_scene_revision_ == window_filter_handoff_revision_) {
+        // This is the explicit worker/convolver acknowledgement. Starting the
+        // transport fade from elapsed time alone is unsafe because a sparse
+        // slot above zero is absent from the old two-source bank.
+        window_filter_handoff_waiting_ = false;
+        window_transport_crossfade_remaining_ =
+            kWindowTransportCrossfadeFrames;
+    }
+
+    if (window_filter_handoff_waiting_) {
+        // Keep the endpoint as the sole input while the worker is preparing the
+        // matching bank. Both endpoint and window banks reserve 0/1 for this
+        // path, while process applications start at index 2. Process FIFOs were
+        // already pulled above.
+        for (std::size_t index = 0; index < frame_count; ++index) {
+            directional_input_[index].sources.fill(0.0F);
+            directional_input_[index].sources[0] =
+                input[index].front_left;
+            directional_input_[index].sources[1] =
+                input[index].front_right;
+            bypass_dry_[index] = {input[index].front_left,
+                                  input[index].front_right};
+        }
+    } else if (window_transport_crossfade_remaining_ != 0U) {
+        // The endpoint loopback and process-loopback streams are not guaranteed
+        // to be phase-aligned. The forward transition uses an equal-power PCM
+        // fade; the reverse transition is covered by the bounded output
+        // de-click because the process stream may already be unavailable.
+        for (std::size_t index = 0; index < frame_count; ++index) {
+            if (window_transport_crossfade_remaining_ == 0U)
+                break;
+            const float progress =
+                1.0F -
+                static_cast<float>(window_transport_crossfade_remaining_) /
+                    static_cast<float>(kWindowTransportCrossfadeFrames);
+            const float endpoint_gain =
+                std::cos(progress * kPi * 0.5F);
+            const float process_gain =
+                std::sin(progress * kPi * 0.5F);
+            DirectionalFrame& directional = directional_input_[index];
+            if (render_window_audio) {
+                for (std::size_t source = kFirstWindowBinauralSource;
+                     source < kMaximumBinauralSources; ++source) {
+                    directional.sources[source] *= process_gain;
+                }
+                directional.sources[kEndpointFallbackLeftSource] =
+                    input[index].front_left * endpoint_gain;
+                directional.sources[kEndpointFallbackRightSource] =
+                    input[index].front_right * endpoint_gain;
+                bypass_dry_[index].left =
+                    bypass_dry_[index].left * process_gain +
+                    input[index].front_left * endpoint_gain;
+                bypass_dry_[index].right =
+                    bypass_dry_[index].right * process_gain +
+                    input[index].front_right * endpoint_gain;
+            } else {
+                // Process PCM is no longer guaranteed to exist. Both banks
+                // render the endpoint from the same permanent indices.
+                directional.sources[kEndpointFallbackLeftSource] =
+                    input[index].front_left;
+                directional.sources[kEndpointFallbackRightSource] =
+                    input[index].front_right;
+                bypass_dry_[index] = {input[index].front_left,
+                                      input[index].front_right};
+            }
+            --window_transport_crossfade_remaining_;
+        }
+    }
+    window_audio_rendering_status_.store(
+        render_window_audio && !window_filter_handoff_waiting_,
+        std::memory_order_release);
+    const StereoFrame* dry_input = bypass_dry_.data();
+
+    if (!active_window_audio_enabled_ && active_scene_.source_count == 2) {
         binaural_detector_.process(detector_input_.data(), frame_count);
         potentially_binaural_.store(binaural_detector_.potentially_binaural(), std::memory_order_relaxed);
     } else {
@@ -633,7 +1102,8 @@ void SpatialAudioEngine::process_chunk(const ProgrammeFrame* input, StereoFrame*
     }
 
     convolver_.process(directional_input_.data(), output, frame_count);
-    if (active_scene_.room_enabled && active_scene_.room_mix > 0.0F) {
+    if (!active_window_audio_enabled_ && active_scene_.room_enabled &&
+        active_scene_.room_mix > 0.0F) {
         for (std::size_t index = 0; index < frame_count; ++index) room_early_[index].fill(0.0F);
         for (std::size_t source = 0; source < active_scene_.source_count; ++source) {
             for (std::size_t index = 0; index < frame_count; ++index)
@@ -684,6 +1154,24 @@ void SpatialAudioEngine::process_chunk(const ProgrammeFrame* input, StereoFrame*
     }
     bypass_crossfade_.process(dry_input, output, frame_count);
     limiter_.process(output, frame_count);
+    for (std::size_t index = 0; index < frame_count; ++index) {
+        if (window_output_declick_remaining_ != 0U) {
+            const float progress =
+                1.0F -
+                static_cast<float>(window_output_declick_remaining_) /
+                    static_cast<float>(kWindowTransportCrossfadeFrames);
+            const float previous_gain = 1.0F - progress;
+            output[index].left =
+                window_output_declick_hold_.left * previous_gain +
+                output[index].left * progress;
+            output[index].right =
+                window_output_declick_hold_.right * previous_gain +
+                output[index].right * progress;
+            --window_output_declick_remaining_;
+        }
+        last_output_frame_ = output[index];
+        last_output_frame_valid_ = true;
+    }
 }
 
 void SpatialAudioEngine::process_audio(const ProgrammeFrame* input, StereoFrame* output, std::size_t frame_count,
@@ -693,6 +1181,26 @@ void SpatialAudioEngine::process_audio(const ProgrammeFrame* input, StereoFrame*
     PreparedScene prepared{};
     if (scene_commands_.try_pop(prepared))
         apply_prepared_scene(prepared, true);
+    const bool requested_window_audio =
+        window_audio_requested_.load(std::memory_order_acquire);
+    if (requested_window_audio != active_window_audio_enabled_) {
+        active_window_audio_enabled_ = requested_window_audio;
+        active_window_source_count_ = 0;
+        active_window_positions_.fill(Vec3f{});
+        active_window_gains_.fill(0.0F);
+        active_window_handles_.fill(WindowAudioSlotHandle{});
+        primed_window_handles_.fill(WindowAudioSlotHandle{});
+        window_filter_handoff_waiting_ = false;
+        window_filter_handoff_revision_ = 0U;
+        window_transport_crossfade_remaining_ = 0U;
+        ++active_scene_revision_;
+        filter_request_dirty_ = true;
+        for (auto& reflections : early_reflections_) reflections.reset();
+        late_reverb_.reset();
+        room_decoder_.reset();
+        room_filters_initialized_ = false;
+        room_filter_scene_revision_ = 0;
+    }
     const double render_time = qpc_to_seconds(render_qpc != 0 ? render_qpc : current_qpc());
     std::size_t offset = 0;
     while (offset < frame_count) {
@@ -711,6 +1219,9 @@ void SpatialAudioEngine::process_audio(const ProgrammeFrame* input, StereoFrame*
 
 EngineStatusV1 SpatialAudioEngine::status() const {
     const AudioBackendDiagnostics audio = backend_->diagnostics();
+    const WindowAudioSnapshot window_snapshot = window_audio_capture_->snapshot();
+    const WindowAudioDiagnostics window_diagnostics =
+        window_audio_capture_->diagnostics();
     EngineStatusV1 result{};
     result.capture_state = audio.capture_state;
     result.render_state = audio.render_state;
@@ -730,10 +1241,17 @@ EngineStatusV1 SpatialAudioEngine::status() const {
     result.latency_p50_ms = latency_p50_ms_.load(std::memory_order_relaxed);
     result.latency_p95_ms = latency_p95_ms_.load(std::memory_order_relaxed);
     result.potentially_binaural = potentially_binaural_.load(std::memory_order_relaxed);
+    result.window_audio_source_count =
+        static_cast<std::uint32_t>(window_diagnostics.active_slots);
+    result.window_audio_json =
+        window_audio_status_to_json(window_snapshot, window_diagnostics);
     {
         std::scoped_lock lock(control_mutex_);
         result.audio_mode = effective_audio_mode_.value_or(scene_.audio.mode);
         result.input_layout = scene_.audio.input_layout;
+        result.window_audio_enabled = window_audio_config_.enabled;
+        result.window_audio_rendering =
+            window_audio_rendering_status_.load(std::memory_order_acquire);
         result.last_error = audio.last_error;
         const auto append_warning = [&result](const std::string& warning) {
             if (warning.empty()) return;
@@ -742,7 +1260,16 @@ EngineStatusV1 SpatialAudioEngine::status() const {
         };
         append_warning(audio_mode_warning_);
         append_warning(hrtf_warning_);
-        if (!audio_mode_warning_.empty() || !hrtf_warning_.empty()) {
+        bool window_audio_warning = false;
+        if (window_audio_config_.enabled &&
+            window_diagnostics.last_error[0] != '\0') {
+            const auto end = std::find(window_diagnostics.last_error.begin(),
+                                       window_diagnostics.last_error.end(), '\0');
+            append_warning(std::string(window_diagnostics.last_error.begin(), end));
+            window_audio_warning = true;
+        }
+        if (!audio_mode_warning_.empty() || !hrtf_warning_.empty() ||
+            window_audio_warning) {
             if (result.capture_state == StreamState::running)
                 result.capture_state = StreamState::degraded;
             if (result.render_state == StreamState::running)

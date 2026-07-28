@@ -28,6 +28,7 @@ const MAX_JSON_BYTES: usize = 1 << 20;
 const MAX_SOFA_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_EQ_BYTES: u64 = 1 << 20;
 const MAX_EQ_FILTERS: usize = 16;
+const ENGINE_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const POSE_RECONNECT_MIN_DELAY: Duration = Duration::from_millis(2);
 const POSE_RECONNECT_MAX_DELAY: Duration = Duration::from_millis(20);
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -36,7 +37,27 @@ struct PipeShared {
     endpoint: Result<String, String>,
     writer: Mutex<Option<Arc<Mutex<File>>>>,
     latest_status: Mutex<Option<String>>,
+    next_command_id: AtomicU64,
+    next_connection_generation: AtomicU64,
+    active_connection_generation: AtomicU64,
+    pending_commands: Mutex<HashMap<u32, Arc<PendingEngineCommand>>>,
     connection: Mutex<()>,
+}
+
+struct PendingEngineCommand {
+    connection_generation: u64,
+    outcome: Mutex<Option<Result<(), String>>>,
+    ready: Condvar,
+}
+
+impl PendingEngineCommand {
+    fn new(connection_generation: u64) -> Self {
+        Self {
+            connection_generation,
+            outcome: Mutex::new(None),
+            ready: Condvar::new(),
+        }
+    }
 }
 
 struct PosePipeShared {
@@ -59,6 +80,10 @@ impl Default for PipeShared {
             endpoint: current_engine_pipe_name(),
             writer: Mutex::new(None),
             latest_status: Mutex::new(None),
+            next_command_id: AtomicU64::new(1),
+            next_connection_generation: AtomicU64::new(1),
+            active_connection_generation: AtomicU64::new(0),
+            pending_commands: Mutex::new(HashMap::new()),
             connection: Mutex::new(()),
         }
     }
@@ -460,7 +485,11 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), String> {
 #[tauri::command(async)]
 fn load_app_config(app: AppHandle) -> Result<Option<String>, String> {
     let directory = app_data_dir(&app)?;
-    for file_name in ["desktop-config-v2.json", "desktop-config-v1.json"] {
+    for file_name in [
+        "desktop-config-v3.json",
+        "desktop-config-v2.json",
+        "desktop-config-v1.json",
+    ] {
         let path = directory.join(file_name);
         match fs::metadata(&path) {
             Ok(metadata) if !metadata.is_file() || metadata.len() > MAX_JSON_BYTES as u64 => {
@@ -492,10 +521,14 @@ fn validate_app_config_json(payload: &str) -> Result<(), String> {
         .pointer("/scene/schemaVersion")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or_default();
-    if !matches!((envelope_version, scene_version), (1, 1) | (2, 2))
+    if !matches!((envelope_version, scene_version), (1, 1) | (2, 2) | (3, 2))
         || !document
             .get("preferences")
             .is_some_and(serde_json::Value::is_object)
+        || (envelope_version == 3
+            && !document
+                .get("windowSpatialization")
+                .is_some_and(serde_json::Value::is_object))
     {
         return Err("Version ou structure de configuration non prise en charge".into());
     }
@@ -510,12 +543,12 @@ fn save_app_config(app: AppHandle, payload: String) -> Result<(), String> {
     if document
         .get("schemaVersion")
         .and_then(serde_json::Value::as_u64)
-        != Some(2)
+        != Some(3)
     {
-        return Err("Seule la configuration courante V2 peut être enregistrée".into());
+        return Err("Seule la configuration courante V3 peut être enregistrée".into());
     }
     atomic_write(
-        &app_data_dir(&app)?.join("desktop-config-v2.json"),
+        &app_data_dir(&app)?.join("desktop-config-v3.json"),
         payload.as_bytes(),
     )
 }
@@ -883,7 +916,8 @@ fn executable_engine_candidates(executable: &Path) -> Vec<PathBuf> {
     let Some(binary_directory) = executable.parent() else {
         return Vec::new();
     };
-    let mut result = vec![binary_directory.join("SoundSpatializer.Engine.exe")];
+    let sibling = binary_directory.join("SoundSpatializer.Engine.exe");
+    let mut result = Vec::new();
 
     // A repository Release/Debug executable lives under
     // apps/desktop/src-tauri/target/<profile>. Derive the workspace root from
@@ -917,6 +951,22 @@ fn executable_engine_candidates(executable: &Path) -> Vec<PathBuf> {
             == Some("apps");
     if repository_layout {
         if let Some(workspace) = workspace {
+            // Development must not silently reuse a stale executable copied to
+            // target/debug by an earlier run. Prefer the reproducible workspace
+            // build; release and installed binaries remain self-contained.
+            if profile == Some("debug") {
+                result.push(
+                    workspace
+                        .join("build/engine-mysofa/Debug")
+                        .join("SoundSpatializer.Engine.exe"),
+                );
+                result.push(
+                    workspace
+                        .join("build/engine-dev/Debug")
+                        .join("SoundSpatializer.Engine.exe"),
+                );
+            }
+            result.push(sibling.clone());
             result.push(
                 workspace
                     .join("build/engine-mysofa/Release")
@@ -933,6 +983,11 @@ fn executable_engine_candidates(executable: &Path) -> Vec<PathBuf> {
                     .join("SoundSpatializer.Engine.exe"),
             );
         }
+    } else {
+        result.push(sibling.clone());
+    }
+    if result.is_empty() {
+        result.push(sibling);
     }
     result
 }
@@ -993,7 +1048,23 @@ fn start_engine(app: AppHandle, state: State<'_, DesktopState>) -> Result<(), St
             return Err(error.to_string());
         }
     }
-    ensure_engine_process(&app, &state)
+    ensure_engine_process(&app, &state)?;
+    // Le moteur publie son statut toutes les 250 ms. Attendre le premier
+    // snapshot permet de négocier l'ACK de commandes avant le bootstrap, tout
+    // en restant compatible avec un ancien moteur V1 déjà lancé.
+    for _ in 0..30 {
+        if state
+            .pipe
+            .latest_status
+            .lock()
+            .map(|status| status.is_some())
+            .unwrap_or(false)
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Ok(())
 }
 
 fn ensure_engine_process(app: &AppHandle, state: &DesktopState) -> Result<(), String> {
@@ -1051,7 +1122,13 @@ fn ensure_engine_process(app: &AppHandle, state: &DesktopState) -> Result<(), St
     connect_pipe_with_retry(&state.pipe, 100, Duration::from_millis(50)).map(|_| ())
 }
 
-fn connect_pipe(shared: &Arc<PipeShared>) -> Result<Arc<Mutex<File>>, String> {
+#[derive(Clone)]
+struct EnginePipeConnection {
+    writer: Arc<Mutex<File>>,
+    generation: u64,
+}
+
+fn connect_pipe(shared: &Arc<PipeShared>) -> Result<EnginePipeConnection, String> {
     connect_pipe_with_retry(shared, 8, Duration::from_millis(25))
 }
 
@@ -1059,7 +1136,7 @@ fn connect_pipe_with_retry(
     shared: &Arc<PipeShared>,
     attempts: usize,
     delay: Duration,
-) -> Result<Arc<Mutex<File>>, String> {
+) -> Result<EnginePipeConnection, String> {
     let _connection = shared
         .connection
         .lock()
@@ -1071,7 +1148,10 @@ fn connect_pipe_with_retry(
         .map_err(|_| "Verrou IPC empoisonné".to_string())?
         .as_ref()
     {
-        return Ok(Arc::clone(writer));
+        return Ok(EnginePipeConnection {
+            writer: Arc::clone(writer),
+            generation: shared.active_connection_generation.load(Ordering::Acquire),
+        });
     }
     let mut last_error = None;
     for attempt in 0..attempts.max(1) {
@@ -1079,36 +1159,75 @@ fn connect_pipe_with_retry(
             Ok(file) => {
                 let reader = file.try_clone().map_err(|error| error.to_string())?;
                 let writer = Arc::new(Mutex::new(file));
+                let generation = loop {
+                    let candidate = shared
+                        .next_connection_generation
+                        .fetch_add(1, Ordering::Relaxed);
+                    if candidate != 0 {
+                        break candidate;
+                    }
+                };
                 *shared
                     .writer
                     .lock()
                     .map_err(|_| "Verrou IPC empoisonné".to_string())? = Some(Arc::clone(&writer));
+                shared
+                    .active_connection_generation
+                    .store(generation, Ordering::Release);
                 let shared_for_thread = Arc::clone(shared);
                 let writer_for_thread = Arc::clone(&writer);
                 if let Err(error) = thread::Builder::new()
                     .name("ssp-status-reader".into())
                     .spawn(move || {
-                        status_reader(reader, &shared_for_thread);
-                        if let Ok(mut status) = shared_for_thread.latest_status.lock() {
-                            *status = None;
-                        }
-                        if let Ok(mut slot) = shared_for_thread.writer.lock() {
-                            if slot
-                                .as_ref()
-                                .is_some_and(|current| Arc::ptr_eq(current, &writer_for_thread))
-                            {
-                                *slot = None;
-                            }
-                        }
+                        status_reader(reader, &shared_for_thread, generation);
+                        let _was_current = shared_for_thread
+                            .connection
+                            .lock()
+                            .ok()
+                            .and_then(|_connection| {
+                                let mut slot = shared_for_thread.writer.lock().ok()?;
+                                if shared_for_thread
+                                    .active_connection_generation
+                                    .load(Ordering::Acquire)
+                                    == generation
+                                    && slot.as_ref().is_some_and(|current| {
+                                        Arc::ptr_eq(current, &writer_for_thread)
+                                    })
+                                {
+                                    *slot = None;
+                                    shared_for_thread
+                                        .active_connection_generation
+                                        .store(0, Ordering::Release);
+                                    // Keep status invalidation in this same
+                                    // critical section. Otherwise a freshly
+                                    // connected reader could publish its status
+                                    // before this stale reader clears the slot.
+                                    if let Ok(mut status) = shared_for_thread.latest_status.lock() {
+                                        *status = None;
+                                    }
+                                    Some(true)
+                                } else {
+                                    Some(false)
+                                }
+                            })
+                            .unwrap_or(false);
+                        fail_pending_engine_commands_for_generation(
+                            &shared_for_thread,
+                            generation,
+                            "Connexion au moteur interrompue",
+                        );
                     })
                 {
                     *shared
                         .writer
                         .lock()
                         .map_err(|_| "Verrou IPC empoisonné".to_string())? = None;
+                    shared
+                        .active_connection_generation
+                        .store(0, Ordering::Release);
                     return Err(error.to_string());
                 }
-                return Ok(writer);
+                return Ok(EnginePipeConnection { writer, generation });
             }
             Err(error) => last_error = Some(error),
         }
@@ -1124,7 +1243,7 @@ fn connect_pipe_with_retry(
     ))
 }
 
-fn status_reader(mut reader: File, shared: &Arc<PipeShared>) {
+fn status_reader(mut reader: File, shared: &Arc<PipeShared>, generation: u64) {
     loop {
         let mut length = [0_u8; 4];
         if reader.read_exact(&mut length).is_err() {
@@ -1139,29 +1258,190 @@ fn status_reader(mut reader: File, shared: &Arc<PipeShared>) {
             break;
         }
         if let Ok(status) = String::from_utf8(payload) {
-            if serde_json::from_str::<serde_json::Value>(&status).is_ok() {
-                if let Ok(mut slot) = shared.latest_status.lock() {
-                    *slot = Some(status);
-                }
-            }
+            dispatch_engine_frame(status, shared, generation);
         }
     }
 }
 
+fn dispatch_engine_frame(frame: String, shared: &Arc<PipeShared>, generation: u64) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&frame) else {
+        return;
+    };
+    if value.get("kind").and_then(serde_json::Value::as_str) == Some("command-result") {
+        let Some(command_id) = value
+            .get("commandId")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            return;
+        };
+        let accepted = value
+            .get("accepted")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        // Optional for rolling upgrades from the first ACK-capable engine.
+        let persisted = value
+            .get("persisted")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let error = value
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Le moteur a rejeté la commande")
+            .to_string();
+        let pending = shared
+            .pending_commands
+            .lock()
+            .ok()
+            .and_then(|mut commands| {
+                let belongs_to_reader = commands
+                    .get(&command_id)
+                    .is_some_and(|pending| pending.connection_generation == generation);
+                belongs_to_reader
+                    .then(|| commands.remove(&command_id))
+                    .flatten()
+            });
+        if let Some(pending) = pending {
+            if let Ok(mut outcome) = pending.outcome.lock() {
+                *outcome = Some(if !accepted {
+                    Err(error)
+                } else if !persisted {
+                    Err(format!(
+                        "ENGINE_COMMAND_APPLIED_NOT_PERSISTED commandId={command_id}: {error}"
+                    ))
+                } else {
+                    Ok(())
+                });
+                pending.ready.notify_all();
+            }
+        }
+        return;
+    }
+    // Couple publication to reconnect/disconnect. A stale reader can therefore
+    // never replace a status already emitted by its successor.
+    let Ok(_connection) = shared.connection.lock() else {
+        return;
+    };
+    if shared.active_connection_generation.load(Ordering::Acquire) == generation {
+        if let Ok(mut slot) = shared.latest_status.lock() {
+            *slot = Some(frame);
+        }
+    }
+}
+
+fn fail_pending_engine_commands_for_generation(shared: &PipeShared, generation: u64, detail: &str) {
+    let pending = shared
+        .pending_commands
+        .lock()
+        .map(|mut commands| {
+            let ids = commands
+                .iter()
+                .filter_map(|(id, pending)| {
+                    (pending.connection_generation == generation).then_some(*id)
+                })
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| commands.remove(&id).map(|command| (id, command)))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for (command_id, command) in pending {
+        if let Ok(mut outcome) = command.outcome.lock() {
+            *outcome = Some(Err(format!(
+                "ENGINE_COMMAND_OUTCOME_UNKNOWN commandId={command_id}: {detail}"
+            )));
+            command.ready.notify_all();
+        }
+    }
+}
+
+fn status_supports_command_ack(shared: &PipeShared) -> bool {
+    shared
+        .latest_status
+        .lock()
+        .ok()
+        .and_then(|status| status.clone())
+        .and_then(|status| serde_json::from_str::<serde_json::Value>(&status).ok())
+        .and_then(|status| {
+            status
+                .get("commandAckVersion")
+                .and_then(serde_json::Value::as_u64)
+        })
+        == Some(1)
+}
+
+fn engine_command_ack_generation(shared: &PipeShared) -> Option<u64> {
+    let Ok(_connection) = shared.connection.lock() else {
+        return None;
+    };
+    let generation = shared.active_connection_generation.load(Ordering::Acquire);
+    if generation == 0 || !status_supports_command_ack(shared) {
+        return None;
+    }
+    Some(generation)
+}
+
+fn command_requires_ack(payload: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .is_some_and(|command| {
+            command.get("type").and_then(serde_json::Value::as_str)
+                == Some("set-window-spatialization")
+                && command
+                    .pointer("/config/enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+        })
+}
+
+fn wait_for_command_ack_capability(shared: &Arc<PipeShared>) -> Result<Option<u64>, String> {
+    if let Some(generation) = engine_command_ack_generation(shared) {
+        return Ok(Some(generation));
+    }
+    // Establish the duplex pipe first: a newly started engine may not have
+    // emitted its first status frame when bootstrap sends its first commands.
+    let _ = connect_pipe(shared)?;
+    for _ in 0..50 {
+        if let Some(generation) = engine_command_ack_generation(shared) {
+            return Ok(Some(generation));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(engine_command_ack_generation(shared))
+}
+
 fn write_pipe(shared: &Arc<PipeShared>, payload: &[u8]) -> Result<(), String> {
-    let writer = connect_pipe(shared)?;
-    let result = writer
+    let connection = connect_pipe(shared)?;
+    write_connected_pipe(shared, &connection, payload)
+}
+
+fn write_connected_pipe(
+    shared: &Arc<PipeShared>,
+    connection: &EnginePipeConnection,
+    payload: &[u8],
+) -> Result<(), String> {
+    let result = connection
+        .writer
         .lock()
         .map_err(|_| "Verrou IPC empoisonné".to_string())?
         .write_all(payload)
         .map_err(|error| error.to_string());
     if result.is_err() {
+        let _connection_guard = shared.connection.lock().ok();
         if let Ok(mut slot) = shared.writer.lock() {
             if slot
                 .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &writer))
+                .is_some_and(|current| Arc::ptr_eq(current, &connection.writer))
+                && shared.active_connection_generation.load(Ordering::Acquire)
+                    == connection.generation
             {
                 *slot = None;
+                shared
+                    .active_connection_generation
+                    .store(0, Ordering::Release);
+                if let Ok(mut status) = shared.latest_status.lock() {
+                    *status = None;
+                }
             }
         }
     }
@@ -1504,7 +1784,7 @@ fn send_engine_command(
     app: AppHandle,
     state: State<'_, DesktopState>,
     payload: String,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     if payload.is_empty()
         || payload.len() > MAX_JSON_BYTES
         || serde_json::from_str::<serde_json::Value>(&payload).is_err()
@@ -1512,10 +1792,127 @@ fn send_engine_command(
         return Err("Commande moteur invalide".into());
     }
     let payload = resolve_command_resources(&app, &state, &payload)?;
+    if payload.is_empty() || payload.len() > MAX_JSON_BYTES {
+        return Err("Commande moteur résolue trop volumineuse".into());
+    }
+    let requires_ack = command_requires_ack(&payload);
+    let ack_generation = if requires_ack {
+        wait_for_command_ack_capability(&state.pipe)?.ok_or_else(|| {
+            "Le moteur actif est trop ancien pour la spatialisation par fenêtres. \
+             Fermez complètement Sound Spatializer puis relancez l’application."
+                .to_string()
+        })?
+    } else if let Some(generation) = engine_command_ack_generation(&state.pipe) {
+        generation
+    } else {
+        // Compatibilité de mise à jour : un ancien moteur V1 est strict et
+        // rejetterait le champ commandId. Il continue donc à recevoir la forme
+        // historique jusqu'à son prochain redémarrage.
+        let mut frame = Vec::with_capacity(4 + payload.len());
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(payload.as_bytes());
+        write_pipe(&state.pipe, &frame)?;
+        return Ok(0);
+    };
+    let mut command = serde_json::from_str::<serde_json::Value>(&payload)
+        .map_err(|error| format!("Commande moteur invalide : {error}"))?;
+    let command_id = loop {
+        let candidate = state.pipe.next_command_id.fetch_add(1, Ordering::Relaxed) as u32;
+        if candidate != 0 {
+            break candidate;
+        }
+    };
+    command
+        .as_object_mut()
+        .ok_or_else(|| "La commande moteur doit être un objet JSON".to_string())?
+        .insert("commandId".to_string(), serde_json::Value::from(command_id));
+    let payload = serde_json::to_string(&command).map_err(|error| error.to_string())?;
+    if payload.len() > MAX_JSON_BYTES {
+        return Err("Commande moteur avec accusé de réception trop volumineuse".into());
+    }
     let mut frame = Vec::with_capacity(4 + payload.len());
     frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     frame.extend_from_slice(payload.as_bytes());
-    write_pipe(&state.pipe, &frame)
+    const REGISTRATION_ATTEMPTS: usize = 3;
+    let mut registered = None;
+    for _ in 0..REGISTRATION_ATTEMPTS {
+        let connection = connect_pipe(&state.pipe)?;
+        if engine_command_ack_generation(&state.pipe) != Some(connection.generation) {
+            let refreshed_generation = wait_for_command_ack_capability(&state.pipe)?;
+            if refreshed_generation != Some(connection.generation) {
+                continue;
+            }
+        }
+        let pending = Arc::new(PendingEngineCommand::new(connection.generation));
+        let connection_guard = state
+            .pipe
+            .connection
+            .lock()
+            .map_err(|_| "Verrou de connexion IPC empoisonné".to_string())?;
+        let still_current = state
+            .pipe
+            .active_connection_generation
+            .load(Ordering::Acquire)
+            == connection.generation
+            && state
+                .pipe
+                .writer
+                .lock()
+                .map_err(|_| "Verrou IPC empoisonné".to_string())?
+                .as_ref()
+                .is_some_and(|writer| Arc::ptr_eq(writer, &connection.writer))
+            && status_supports_command_ack(&state.pipe);
+        if still_current {
+            state
+                .pipe
+                .pending_commands
+                .lock()
+                .map_err(|_| "Verrou des réponses moteur empoisonné".to_string())?
+                .insert(command_id, Arc::clone(&pending));
+            drop(connection_guard);
+            registered = Some((connection, pending));
+            break;
+        }
+    }
+    let (connection, pending) = registered.ok_or_else(|| {
+        if requires_ack {
+            format!(
+                "Le moteur a changé pendant la négociation ACK (génération initiale {ack_generation}). \
+                 Réessayez après sa reconnexion."
+            )
+        } else {
+            "La connexion moteur a changé pendant l’envoi de la commande".to_string()
+        }
+    })?;
+    if let Err(error) = write_connected_pipe(&state.pipe, &connection, &frame) {
+        if let Ok(mut commands) = state.pipe.pending_commands.lock() {
+            commands.remove(&command_id);
+        }
+        return Err(format!(
+            "ENGINE_COMMAND_OUTCOME_UNKNOWN commandId={command_id}: écriture IPC incomplète ({error})"
+        ));
+    }
+
+    let outcome = pending
+        .outcome
+        .lock()
+        .map_err(|_| "Verrou de réponse moteur empoisonné".to_string())?;
+    let (mut outcome, timeout) = pending
+        .ready
+        .wait_timeout_while(outcome, ENGINE_COMMAND_TIMEOUT, |value| value.is_none())
+        .map_err(|_| "Attente de réponse moteur interrompue".to_string())?;
+    if timeout.timed_out() && outcome.is_none() {
+        if let Ok(mut commands) = state.pipe.pending_commands.lock() {
+            commands.remove(&command_id);
+        }
+        return Err(format!(
+            "ENGINE_COMMAND_OUTCOME_UNKNOWN commandId={command_id}: le moteur n’a pas confirmé la commande dans le délai imparti"
+        ));
+    }
+    outcome
+        .take()
+        .unwrap_or_else(|| Err("Réponse moteur absente".to_string()))?;
+    Ok(connection.generation)
 }
 
 fn pose_packet_from_invoke_body(body: &InvokeBody) -> Result<[u8; 64], String> {
@@ -1585,12 +1982,40 @@ fn crc32(bytes: &[u8]) -> u32 {
 
 #[tauri::command]
 fn get_engine_status(state: State<'_, DesktopState>) -> Result<Option<String>, String> {
-    state
+    let _connection = state
+        .pipe
+        .connection
+        .lock()
+        .map_err(|_| "Verrou de connexion IPC empoisonné".to_string())?;
+    let generation = state
+        .pipe
+        .active_connection_generation
+        .load(Ordering::Acquire);
+    let status = state
         .pipe
         .latest_status
         .lock()
         .map(|value| value.clone())
-        .map_err(|_| "Verrou de statut empoisonné".into())
+        .map_err(|_| "Verrou de statut empoisonné".to_string())?;
+    status
+        .map(|status| annotate_engine_status_generation(&status, generation))
+        .transpose()
+}
+
+fn annotate_engine_status_generation(
+    status: &str,
+    connection_generation: u64,
+) -> Result<String, String> {
+    let mut value = serde_json::from_str::<serde_json::Value>(status)
+        .map_err(|error| format!("Statut moteur JSON invalide : {error}"))?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| "Le statut moteur doit être un objet JSON".to_string())?
+        .insert(
+            "desktopConnectionGeneration".to_string(),
+            serde_json::Value::from(connection_generation),
+        );
+    serde_json::to_string(&value).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1965,6 +2390,27 @@ mod tests {
     }
 
     #[test]
+    fn repository_debug_prefers_the_fresh_workspace_engine() {
+        let executable =
+            Path::new(r"E:\repo\apps\desktop\src-tauri\target\debug\sound-spatializer-desktop.exe");
+        let candidates = executable_engine_candidates(executable);
+        assert_eq!(
+            candidates[0],
+            PathBuf::from(r"E:\repo\build\engine-mysofa\Debug\SoundSpatializer.Engine.exe")
+        );
+        assert_eq!(
+            candidates[1],
+            PathBuf::from(r"E:\repo\build\engine-dev\Debug\SoundSpatializer.Engine.exe")
+        );
+        assert_eq!(
+            candidates[2],
+            PathBuf::from(
+                r"E:\repo\apps\desktop\src-tauri\target\debug\SoundSpatializer.Engine.exe"
+            )
+        );
+    }
+
+    #[test]
     fn installed_release_uses_only_the_wix_sibling_engine() {
         let executable = Path::new(r"C:\Program Files\Sound Spatializer\SoundSpatializer.exe");
         assert_eq!(
@@ -1987,6 +2433,155 @@ mod tests {
         );
         assert!(format_engine_pipe_name("../invalid", 7).is_err());
         assert!(format_pose_pipe_name("../invalid", 7).is_err());
+    }
+
+    #[test]
+    fn command_result_frames_resolve_the_matching_waiter_without_replacing_status() {
+        let shared = Arc::new(PipeShared::default());
+        shared
+            .active_connection_generation
+            .store(1, Ordering::Release);
+        let pending = Arc::new(PendingEngineCommand::new(1));
+        shared
+            .pending_commands
+            .lock()
+            .unwrap()
+            .insert(42, Arc::clone(&pending));
+
+        dispatch_engine_frame(
+            r#"{"schemaVersion":1,"kind":"command-result","commandId":42,"accepted":false,"persisted":false,"error":"configuration refusée"}"#.to_string(),
+            &shared,
+            1,
+        );
+
+        assert_eq!(
+            pending.outcome.lock().unwrap().take(),
+            Some(Err("configuration refusée".to_string()))
+        );
+        assert!(shared.pending_commands.lock().unwrap().is_empty());
+        assert!(shared.latest_status.lock().unwrap().is_none());
+
+        dispatch_engine_frame(
+            r#"{"schemaVersion":1,"captureState":"running"}"#.to_string(),
+            &shared,
+            1,
+        );
+        assert_eq!(
+            shared.latest_status.lock().unwrap().as_deref(),
+            Some(r#"{"schemaVersion":1,"captureState":"running"}"#)
+        );
+        assert!(engine_command_ack_generation(&shared).is_none());
+
+        dispatch_engine_frame(
+            r#"{"schemaVersion":1,"commandAckVersion":1,"captureState":"running"}"#.to_string(),
+            &shared,
+            1,
+        );
+        assert_eq!(engine_command_ack_generation(&shared), Some(1));
+
+        let persistence_pending = Arc::new(PendingEngineCommand::new(1));
+        shared
+            .pending_commands
+            .lock()
+            .unwrap()
+            .insert(43, Arc::clone(&persistence_pending));
+        dispatch_engine_frame(
+            r#"{"schemaVersion":1,"kind":"command-result","commandId":43,"accepted":true,"persisted":false,"error":"disque plein"}"#.to_string(),
+            &shared,
+            1,
+        );
+        assert_eq!(
+            persistence_pending.outcome.lock().unwrap().take(),
+            Some(Err(
+                "ENGINE_COMMAND_APPLIED_NOT_PERSISTED commandId=43: disque plein".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn stale_reader_cannot_publish_or_resolve_for_a_new_generation() {
+        let shared = Arc::new(PipeShared::default());
+        shared
+            .active_connection_generation
+            .store(8, Ordering::Release);
+        let current = Arc::new(PendingEngineCommand::new(8));
+        shared
+            .pending_commands
+            .lock()
+            .unwrap()
+            .insert(80, Arc::clone(&current));
+
+        dispatch_engine_frame(
+            r#"{"schemaVersion":1,"captureState":"stale"}"#.to_string(),
+            &shared,
+            7,
+        );
+        dispatch_engine_frame(
+            r#"{"schemaVersion":1,"kind":"command-result","commandId":80,"accepted":true,"persisted":true,"error":""}"#.to_string(),
+            &shared,
+            7,
+        );
+
+        assert!(shared.latest_status.lock().unwrap().is_none());
+        assert!(current.outcome.lock().unwrap().is_none());
+        assert!(shared.pending_commands.lock().unwrap().contains_key(&80));
+    }
+
+    #[test]
+    fn window_spatialization_requires_an_ack_capable_engine() {
+        assert!(command_requires_ack(
+            r#"{"version":1,"type":"set-window-spatialization","config":{"enabled":true}}"#
+        ));
+        assert!(!command_requires_ack(
+            r#"{"version":1,"type":"set-window-spatialization","config":{"enabled":false}}"#
+        ));
+        assert!(!command_requires_ack(
+            r#"{"version":1,"type":"set-scene","scene":{}}"#
+        ));
+        assert!(!command_requires_ack("not json"));
+    }
+
+    #[test]
+    fn desktop_connection_generation_is_attached_to_engine_status() {
+        let annotated = annotate_engine_status_generation(
+            r#"{"schemaVersion":1,"captureState":"running"}"#,
+            27,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&annotated).unwrap();
+        assert_eq!(
+            value
+                .get("desktopConnectionGeneration")
+                .and_then(serde_json::Value::as_u64),
+            Some(27)
+        );
+        assert!(annotate_engine_status_generation("[]", 1).is_err());
+    }
+
+    #[test]
+    fn closing_an_old_pipe_generation_does_not_fail_new_commands() {
+        let shared = PipeShared::default();
+        let old = Arc::new(PendingEngineCommand::new(7));
+        let current = Arc::new(PendingEngineCommand::new(8));
+        {
+            let mut commands = shared.pending_commands.lock().unwrap();
+            commands.insert(70, Arc::clone(&old));
+            commands.insert(80, Arc::clone(&current));
+        }
+
+        fail_pending_engine_commands_for_generation(&shared, 7, "ancienne connexion interrompue");
+
+        assert_eq!(
+            old.outcome.lock().unwrap().take(),
+            Some(Err(
+                "ENGINE_COMMAND_OUTCOME_UNKNOWN commandId=70: ancienne connexion interrompue"
+                    .to_string()
+            ))
+        );
+        assert!(current.outcome.lock().unwrap().is_none());
+        let commands = shared.pending_commands.lock().unwrap();
+        assert!(!commands.contains_key(&70));
+        assert!(commands.contains_key(&80));
     }
 
     #[test]
@@ -2052,6 +2647,14 @@ mod tests {
             r#"{"schemaVersion":2,"scene":{"schemaVersion":2},"preferences":{}}"#
         )
         .is_ok());
+        assert!(validate_app_config_json(
+            r#"{"schemaVersion":3,"scene":{"schemaVersion":2},"preferences":{},"windowSpatialization":{}}"#
+        )
+        .is_ok());
+        assert!(validate_app_config_json(
+            r#"{"schemaVersion":3,"scene":{"schemaVersion":2},"preferences":{}}"#
+        )
+        .is_err());
         assert!(validate_app_config_json(
             r#"{"schemaVersion":1,"scene":{"schemaVersion":2},"preferences":{}}"#
         )

@@ -19,6 +19,7 @@ add_library(sound_spatializer_engine STATIC
     src/hrtf_worker.cpp
     src/ipc.cpp
     src/pose.cpp
+    src/window_audio.cpp
 )
 
 target_compile_features(sound_spatializer_engine PUBLIC cxx_std_20)
@@ -40,7 +41,13 @@ if(WIN32)
     target_sources(sound_spatializer_engine PRIVATE src/audio_backend_wasapi.cpp)
     target_include_directories(sound_spatializer_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../driver/include)
     target_compile_definitions(sound_spatializer_engine PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(sound_spatializer_engine PRIVATE ole32 avrt advapi32)
+    target_link_libraries(sound_spatializer_engine PRIVATE
+        ole32
+        avrt
+        advapi32
+        Mmdevapi
+        dwmapi
+    )
 endif()
 
 if(SOUND_SPATIALIZER_ENABLE_MYSOFA)

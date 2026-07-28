@@ -10,6 +10,15 @@ contract. `scene-config-v1.schema.json` remains immutable for migration. V2 adds
 the explicit `stereo`/`5.1-surround` input layout, five positional channels in
 canonical order, and a separate non-positional LFE channel.
 
+`window-spatialization-v1.schema.json` is an independent, optional runtime
+contract. It selects process/window capture without changing the speaker-bed
+scene schema, caps the dynamic source bank at eight stereo audio sessions
+deduplicated by process tree, and stores only durable display
+calibrations/application rules. An application label is therefore not a
+one-to-one promise: a capture may include its child processes. PIDs and HWNDs
+are runtime telemetry and are never persisted. The canonical initial
+`stereoSpread` is `0.72`.
+
 `audio.captureProvider` and `audio.captureEndpointId` are optional V1 additions.
 Their absence is exactly equivalent to `native-driver` and `null`, so an older
 canonical scene remains valid. `external-render` always carries a non-empty,

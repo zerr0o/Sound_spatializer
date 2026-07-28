@@ -66,7 +66,7 @@ struct BinauralConvolver::PartitionedState {
     using Spectrum = std::array<std::complex<float>, kFftSize>;
 
     struct FilterSpectra {
-        std::array<std::array<Spectrum, kMaximumTailPartitions>, kDirectionalSourceCount * 2> paths{};
+        std::array<std::array<Spectrum, kMaximumTailPartitions>, kMaximumBinauralSources * 2> paths{};
         std::size_t partition_count{};
         std::size_t source_count{2};
     };
@@ -120,14 +120,16 @@ struct BinauralConvolver::PartitionedState {
     }
 
     void build_filter(const HrirFilterBank& bank, FilterSpectra& output) noexcept {
-        output = {};
         output.source_count = bank.source_count;
-        if (bank.tap_count <= kDirectTapLimit) return;
+        output.partition_count = 0;
+        if (bank.tap_count <= kDirectTapLimit)
+            return;
         const std::size_t tail_taps = bank.tap_count - kDirectTapLimit;
         output.partition_count = (tail_taps + kPartitionFrames - 1) / kPartitionFrames;
-        for (std::size_t path = 0; path < bank.coefficients.size(); ++path) {
+        for (std::size_t path = 0; path < bank.source_count * 2; ++path) {
             for (std::size_t partition = 0; partition < output.partition_count; ++partition) {
                 Spectrum& spectrum = output.paths[path][partition];
+                spectrum.fill({});
                 const std::size_t first_tap = kDirectTapLimit + partition * kPartitionFrames;
                 const std::size_t count = std::min(kPartitionFrames, bank.tap_count - first_tap);
                 for (std::size_t tap = 0; tap < count; ++tap) {
@@ -141,15 +143,21 @@ struct BinauralConvolver::PartitionedState {
     void blend_current_filter(float alpha) noexcept {
         const float current_gain = 1.0F - alpha;
         const std::size_t partitions = std::max(current_filter.partition_count, target_filter.partition_count);
-        for (std::size_t path = 0; path < current_filter.paths.size(); ++path) {
+        const std::size_t source_count = std::max(current_filter.source_count, target_filter.source_count);
+        for (std::size_t path = 0; path < source_count * 2; ++path) {
+            const std::size_t source = path / 2;
+            const bool current_source_active = source < current_filter.source_count;
+            const bool target_source_active = source < target_filter.source_count;
             for (std::size_t partition = 0; partition < partitions; ++partition) {
                 for (std::size_t bin = 0; bin < kFftSize; ++bin) {
-                    const std::complex<float> current = partition < current_filter.partition_count
-                                                            ? current_filter.paths[path][partition][bin]
-                                                            : std::complex<float>{};
-                    const std::complex<float> target = partition < target_filter.partition_count
-                                                           ? target_filter.paths[path][partition][bin]
-                                                           : std::complex<float>{};
+                    const std::complex<float> current =
+                        current_source_active && partition < current_filter.partition_count
+                            ? current_filter.paths[path][partition][bin]
+                            : std::complex<float>{};
+                    const std::complex<float> target =
+                        target_source_active && partition < target_filter.partition_count
+                            ? target_filter.paths[path][partition][bin]
+                            : std::complex<float>{};
                     current_filter.paths[path][partition][bin] = current * current_gain + target * alpha;
                 }
             }
@@ -159,9 +167,14 @@ struct BinauralConvolver::PartitionedState {
     }
 
     void reset_stream() noexcept {
-        input_blocks = {};
-        previous_input_blocks = {};
-        input_spectra = {};
+        for (auto& block : input_blocks)
+            block.fill(0.0F);
+        for (auto& block : previous_input_blocks)
+            block.fill(0.0F);
+        for (auto& source_spectra : input_spectra) {
+            for (auto& spectrum : source_spectra)
+                spectrum.fill({});
+        }
         input_sequences.fill(kInvalidSequence);
         invalidate(current_output);
         invalidate(target_output);
@@ -179,19 +192,29 @@ struct BinauralConvolver::PartitionedState {
 
     void ingest(const DirectionalFrame& input, bool morphing) noexcept {
         const std::size_t offset = static_cast<std::size_t>(sample_position % kPartitionFrames);
-        for (std::size_t source = 0; source < kDirectionalSourceCount; ++source)
+        for (std::size_t source = 0; source < kMaximumBinauralSources; ++source)
             input_blocks[source][offset] = input.sources[source];
         if (offset + 1 == kPartitionFrames) {
             const std::uint64_t sequence = next_input_block++;
             const std::size_t spectrum_slot = static_cast<std::size_t>(sequence % kMaximumTailPartitions);
-            for (std::size_t source = 0; source < kDirectionalSourceCount; ++source) {
-                Spectrum spectrum{};
-                for (std::size_t sample = 0; sample < kPartitionFrames; ++sample) {
-                    spectrum[sample] = previous_input_blocks[source][sample];
-                    spectrum[kPartitionFrames + sample] = input_blocks[source][sample];
+            const std::size_t active_source_count =
+                morphing ? std::max(current_filter.source_count, target_filter.source_count)
+                         : current_filter.source_count;
+            for (std::size_t source = 0; source < kMaximumBinauralSources; ++source) {
+                Spectrum& input_spectrum = input_spectra[source][spectrum_slot];
+                if (source < active_source_count) {
+                    Spectrum spectrum{};
+                    for (std::size_t sample = 0; sample < kPartitionFrames; ++sample) {
+                        spectrum[sample] = previous_input_blocks[source][sample];
+                        spectrum[kPartitionFrames + sample] = input_blocks[source][sample];
+                    }
+                    transform(spectrum, false);
+                    input_spectrum = spectrum;
+                } else {
+                    // A later source-count expansion can rebuild pending tails
+                    // safely without observing an older ring-slot spectrum.
+                    input_spectrum.fill({});
                 }
-                transform(spectrum, false);
-                input_spectra[source][spectrum_slot] = spectrum;
                 previous_input_blocks[source] = input_blocks[source];
             }
             input_sequences[spectrum_slot] = sequence;
@@ -217,14 +240,14 @@ struct BinauralConvolver::PartitionedState {
     FilterSpectra target_filter{};
     HrirFilterBank current_bank{};
     HrirFilterBank target_bank{};
-    std::array<std::array<float, kTimeDomainHrirTaps * 2>, kDirectionalSourceCount> direct_history{};
+    std::array<std::array<float, kTimeDomainHrirTaps * 2>, kMaximumBinauralSources> direct_history{};
     std::size_t direct_history_index{};
     std::uint32_t morph_total{};
     std::uint32_t morph_remaining{};
-    std::array<std::array<Spectrum, kMaximumTailPartitions>, kDirectionalSourceCount> input_spectra{};
+    std::array<std::array<Spectrum, kMaximumTailPartitions>, kMaximumBinauralSources> input_spectra{};
     std::array<std::uint64_t, kMaximumTailPartitions> input_sequences{};
-    std::array<std::array<float, kPartitionFrames>, kDirectionalSourceCount> input_blocks{};
-    std::array<std::array<float, kPartitionFrames>, kDirectionalSourceCount> previous_input_blocks{};
+    std::array<std::array<float, kPartitionFrames>, kMaximumBinauralSources> input_blocks{};
+    std::array<std::array<float, kPartitionFrames>, kMaximumBinauralSources> previous_input_blocks{};
     OutputCache current_output{};
     OutputCache target_output{};
     Spectrum scratch{};
@@ -294,12 +317,17 @@ void BinauralConvolver::freeze_current_morph() noexcept {
     const float alpha = 1.0F - static_cast<float>(partitioned_->morph_remaining) /
                                    static_cast<float>(partitioned_->morph_total);
     const std::size_t count = std::max(partitioned_->current_bank.tap_count, partitioned_->target_bank.tap_count);
-    for (std::size_t path_index = 0; path_index < partitioned_->current_bank.coefficients.size(); ++path_index) {
+    const std::size_t source_count =
+        std::max(partitioned_->current_bank.source_count, partitioned_->target_bank.source_count);
+    for (std::size_t path_index = 0; path_index < source_count * 2; ++path_index) {
+        const std::size_t source = path_index / 2;
+        const bool current_source_active = source < partitioned_->current_bank.source_count;
+        const bool target_source_active = source < partitioned_->target_bank.source_count;
         for (std::size_t tap = 0; tap < count; ++tap) {
-            const float current = tap < partitioned_->current_bank.tap_count
+            const float current = current_source_active && tap < partitioned_->current_bank.tap_count
                                       ? partitioned_->current_bank.coefficients[path_index][tap]
                                       : 0.0F;
-            const float target = tap < partitioned_->target_bank.tap_count
+            const float target = target_source_active && tap < partitioned_->target_bank.tap_count
                                      ? partitioned_->target_bank.coefficients[path_index][tap]
                                      : 0.0F;
             partitioned_->current_bank.coefficients[path_index][tap] =
@@ -318,10 +346,15 @@ void BinauralConvolver::freeze_current_morph() noexcept {
 
 bool BinauralConvolver::set_filters(const HrirFilterBank& filters, std::uint32_t morph_frames) noexcept {
     if (filters.tap_count == 0 || filters.tap_count > kMaximumHrirTaps ||
-        filters.source_count == 0 || filters.source_count > kDirectionalSourceCount) {
+        filters.source_count == 0 || filters.source_count > kMaximumBinauralSources ||
+        filters.coefficients.size() != kMaximumBinauralSources * 2) {
         return false;
     }
     freeze_current_morph();
+    // Known RT limitation: set_filters() is consumed by the audio callback and
+    // build_filter() still performs the partition-spectrum FFTs here. A future
+    // bounded refactor must publish precomputed spectra from the HRTF worker;
+    // this pass deliberately changes neither mailbox ownership nor slot reuse.
     partitioned_->build_filter(filters, partitioned_->target_filter);
     if (morph_frames == 0) {
         partitioned_->current_bank = filters;
@@ -376,7 +409,7 @@ void BinauralConvolver::process(const DirectionalFrame* input, StereoFrame* outp
         const DirectionalFrame input_frame = input[frame];
         partitioned_->direct_history_index =
             (partitioned_->direct_history_index + kTimeDomainHrirTaps - 1) % kTimeDomainHrirTaps;
-        for (std::size_t source = 0; source < kDirectionalSourceCount; ++source) {
+        for (std::size_t source = 0; source < kMaximumBinauralSources; ++source) {
             auto& history = partitioned_->direct_history[source];
             history[partitioned_->direct_history_index] = input_frame.sources[source];
             history[partitioned_->direct_history_index + kTimeDomainHrirTaps] = input_frame.sources[source];
@@ -906,7 +939,8 @@ void AsyncStereoResampler::build_kernel_table() noexcept {
 bool AsyncStereoResampler::prime() noexcept {
     constexpr std::size_t centre_index = kKernelTaps / 2 - 1;
     constexpr std::size_t required_future_samples = kKernelTaps - centre_index;
-    if (fifo_.size() < required_future_samples) {
+    if (fifo_.size() <
+        std::max(required_future_samples, startup_fill_frames_)) {
         return false;
     }
     source_window_.fill({});
@@ -928,6 +962,7 @@ std::size_t AsyncStereoResampler::push(const StereoFrame* frames, std::size_t fr
         // Diagnostics report discontinuity events, not the number of frames
         // discarded by a single full-FIFO write.
         overruns_.fetch_add(1, std::memory_order_relaxed);
+        request_rebase();
     }
     return pushed;
 }
@@ -937,6 +972,38 @@ std::size_t AsyncStereoResampler::render(StereoFrame* output, std::size_t frame_
     if (output == nullptr || frame_count == 0) {
         return 0;
     }
+    const auto reset_interpolator = [this] {
+        drift_controller_.reset();
+        source_window_.fill({});
+        phase_ = 0.0;
+        primed_ = false;
+        current_ratio_.store(nominal_ratio_, std::memory_order_relaxed);
+    };
+
+    bool rebased = false;
+    const std::uint64_t requested_revision =
+        requested_rebase_revision_.load(std::memory_order_acquire);
+    if (requested_revision != applied_rebase_revision_) {
+        const std::size_t boundary =
+            requested_rebase_boundary_.load(std::memory_order_relaxed);
+        (void)fifo_.discard_before(boundary);
+        reset_interpolator();
+        applied_rebase_revision_ = requested_revision;
+        rebased = true;
+    }
+
+    const std::size_t fill_before_render = fifo_.size();
+    if (rebase_threshold_frames_ != 0 &&
+        fill_before_render > rebase_threshold_frames_) {
+        const std::size_t retained =
+            std::min(fill_before_render, target_fill_frames_);
+        (void)fifo_.discard_oldest(fill_before_render - retained);
+        reset_interpolator();
+        rebased = true;
+    }
+    if (rebased)
+        rebases_.fetch_add(1, std::memory_order_relaxed);
+
     if (!primed_) {
         if (!prime()) {
             std::fill_n(output, frame_count, StereoFrame{});
@@ -975,6 +1042,12 @@ std::size_t AsyncStereoResampler::render(StereoFrame* output, std::size_t frame_
     return frame_count;
 }
 
+void AsyncStereoResampler::request_rebase() noexcept {
+    requested_rebase_boundary_.store(fifo_.producer_sequence(),
+                                     std::memory_order_relaxed);
+    requested_rebase_revision_.fetch_add(1, std::memory_order_release);
+}
+
 void AsyncStereoResampler::reset() noexcept {
     fifo_.reset();
     drift_controller_.reset();
@@ -983,6 +1056,11 @@ void AsyncStereoResampler::reset() noexcept {
     primed_ = false;
     underruns_.store(0, std::memory_order_relaxed);
     overruns_.store(0, std::memory_order_relaxed);
+    rebases_.store(0, std::memory_order_relaxed);
+    requested_rebase_boundary_.store(fifo_.producer_sequence(),
+                                     std::memory_order_relaxed);
+    applied_rebase_revision_ =
+        requested_rebase_revision_.load(std::memory_order_acquire);
     current_ratio_.store(nominal_ratio_, std::memory_order_relaxed);
 }
 

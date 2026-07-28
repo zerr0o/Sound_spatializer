@@ -1,10 +1,10 @@
 import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
-import { defaultPreferences, defaultScene, emptyEngineStatus } from './data/defaults';
+import { defaultPreferences, defaultScene, defaultWindowSpatialization, emptyEngineStatus } from './data/defaults';
 import { desktopBridge } from './lib/tauri-bridge';
 import { useAppStore } from './store/app-store';
-import type { AudioDeviceSummary, PersistedAppConfigV2 } from './types/contracts';
+import type { AudioDeviceSummary, PersistedAppConfigV3 } from './types/contracts';
 
 vi.mock('./tracking/TrackingProvider', () => ({
   useTrackingController: () => ({ calibrate: vi.fn().mockResolvedValue(true) }),
@@ -34,15 +34,24 @@ const external: AudioDeviceSummary = {
   channelMask: 0x3,
 };
 
-const externalConfig = (): PersistedAppConfigV2 => {
+const externalSurround: AudioDeviceSummary = {
+  ...external,
+  id: 'external-render-5-1',
+  name: 'Endpoint externe 5.1',
+  channelCount: 6,
+  channelMask: 0x3f,
+};
+
+const externalConfig = (): PersistedAppConfigV3 => {
   const scene = structuredClone(defaultScene);
   scene.captureProvider = 'external-render';
   scene.captureEndpointId = external.id;
   scene.physicalOutputDeviceId = physical.id;
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     scene,
     preferences: { ...defaultPreferences, onboardingComplete: true },
+    windowSpatialization: structuredClone(defaultWindowSpatialization),
   };
 };
 
@@ -51,8 +60,19 @@ describe('bootstrap du routage audio', () => {
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} });
     useAppStore.setState({ initialized: false, audioDevices: [], toasts: [] });
     vi.spyOn(desktopBridge, 'startEngine').mockResolvedValue();
-    vi.spyOn(desktopBridge, 'getEngineStatus').mockResolvedValue(structuredClone(emptyEngineStatus));
+    vi.spyOn(desktopBridge, 'getEngineStatus').mockResolvedValue({
+      ...structuredClone(emptyEngineStatus),
+      connectionGeneration: 1,
+    });
     vi.spyOn(desktopBridge, 'saveConfig').mockResolvedValue();
+    vi.spyOn(desktopBridge, 'sendCommandWithGeneration')
+      .mockImplementation(async (command) => {
+        await desktopBridge.sendCommand(command);
+        return 1;
+      });
+    vi.spyOn(desktopBridge, 'runCommandTransaction')
+      .mockImplementation((operation) => operation((command) =>
+        desktopBridge.sendCommand(command)));
   });
 
   afterEach(() => {
@@ -71,19 +91,308 @@ describe('bootstrap du routage audio', () => {
     await waitFor(() => expect(sendCommand).toHaveBeenCalledWith({ version: 1, type: 'start' }));
     const commands = sendCommand.mock.calls.map(([command]) => command);
     expect(commands[0]).toMatchObject({ type: 'set-scene' });
-    expect(commands[1]).toEqual({
+    expect(commands[1]).toMatchObject({ type: 'set-window-spatialization' });
+    expect(commands[2]).toEqual({
       version: 1,
       type: 'set-audio-route',
       captureProvider: 'external-render',
       captureEndpointId: external.id,
       outputDeviceId: physical.id,
     });
-    expect(commands[2]).toEqual({ version: 1, type: 'start' });
+    expect(commands[3]).toEqual({ version: 1, type: 'start' });
     expect(useAppStore.getState()).toMatchObject({
       driverEndpointAvailable: false,
       audioRouteReady: true,
       previewMode: false,
     });
+  });
+
+  it('rejoue la configuration canonique après une nouvelle génération moteur', async () => {
+    vi.spyOn(desktopBridge, 'loadConfig').mockResolvedValue(externalConfig());
+    vi.spyOn(desktopBridge, 'listAudioDevices').mockResolvedValue([external, physical]);
+    let generation = 1;
+    vi.spyOn(desktopBridge, 'getEngineStatus').mockImplementation(async () => ({
+      ...structuredClone(emptyEngineStatus),
+      connectionGeneration: generation,
+    }));
+    const sendCommand = vi.spyOn(desktopBridge, 'sendCommand').mockResolvedValue();
+
+    render(<App />);
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledWith({ version: 1, type: 'start' }));
+    await waitFor(() => expect(useAppStore.getState().engine.connectionGeneration).toBe(1));
+    sendCommand.mockClear();
+
+    generation = 2;
+
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledWith({
+      version: 1,
+      type: 'set-audio-route',
+      captureProvider: 'external-render',
+      captureEndpointId: external.id,
+      outputDeviceId: physical.id,
+    }));
+    expect(sendCommand.mock.calls.map(([command]) => command.type)).toEqual([
+      'set-window-spatialization',
+      'set-scene',
+      'set-audio-route',
+      'start',
+    ]);
+  });
+
+  it('rejoue si la génération change entre deux ACK du bootstrap', async () => {
+    vi.spyOn(desktopBridge, 'loadConfig').mockResolvedValue(externalConfig());
+    vi.spyOn(desktopBridge, 'listAudioDevices').mockResolvedValue([external, physical]);
+    vi.mocked(desktopBridge.getEngineStatus).mockResolvedValue({
+      ...structuredClone(emptyEngineStatus),
+      connectionGeneration: 2,
+    });
+    const sendCommand = vi.spyOn(desktopBridge, 'sendCommand').mockResolvedValue();
+    let acknowledgedCommands = 0;
+    vi.mocked(desktopBridge.sendCommandWithGeneration)
+      .mockImplementation(async (command) => {
+        await desktopBridge.sendCommand(command);
+        acknowledgedCommands += 1;
+        return acknowledgedCommands === 1 ? 1 : 2;
+      });
+
+    render(<App />);
+
+    await waitFor(() => expect(
+      sendCommand.mock.calls.filter(([command]) => command.type === 'set-scene'),
+    ).toHaveLength(2));
+    expect(desktopBridge.sendCommandWithGeneration).toHaveBeenCalledTimes(4);
+    expect(sendCommand.mock.calls.map(([command]) => command.type)).toEqual([
+      'set-scene',
+      'set-window-spatialization',
+      'set-audio-route',
+      'start',
+      'set-window-spatialization',
+      'set-scene',
+      'set-audio-route',
+      'start',
+    ]);
+  });
+
+  it('rejoue si le moteur redémarre entre le dernier ACK et le statut final', async () => {
+    vi.spyOn(desktopBridge, 'loadConfig').mockResolvedValue(externalConfig());
+    vi.spyOn(desktopBridge, 'listAudioDevices').mockResolvedValue([external, physical]);
+    vi.mocked(desktopBridge.getEngineStatus).mockResolvedValue({
+      ...structuredClone(emptyEngineStatus),
+      connectionGeneration: 8,
+    });
+    const sendCommand = vi.spyOn(desktopBridge, 'sendCommand').mockResolvedValue();
+    vi.mocked(desktopBridge.sendCommandWithGeneration)
+      .mockImplementation(async (command) => {
+        await desktopBridge.sendCommand(command);
+        return 7;
+      });
+
+    render(<App />);
+
+    await waitFor(() => expect(
+      sendCommand.mock.calls.filter(([command]) => command.type === 'set-scene'),
+    ).toHaveLength(2));
+    expect(desktopBridge.sendCommandWithGeneration).toHaveBeenCalledTimes(4);
+    expect(sendCommand.mock.calls.map(([command]) => command.type)).toEqual([
+      'set-scene',
+      'set-window-spatialization',
+      'set-audio-route',
+      'start',
+      'set-window-spatialization',
+      'set-scene',
+      'set-audio-route',
+      'start',
+    ]);
+  });
+
+  it('rejoue dès la première génération quand le bootstrap reste indéterminé', async () => {
+    vi.spyOn(desktopBridge, 'loadConfig').mockResolvedValue(externalConfig());
+    vi.spyOn(desktopBridge, 'listAudioDevices').mockResolvedValue([external, physical]);
+    vi.spyOn(desktopBridge, 'getEngineStatus').mockResolvedValue({
+      ...structuredClone(emptyEngineStatus),
+      connectionGeneration: 1,
+    });
+    let sceneAttempts = 0;
+    const sendCommand = vi.spyOn(desktopBridge, 'sendCommand')
+      .mockImplementation(async (command) => {
+        if (command.type === 'set-scene' && sceneAttempts++ === 0) {
+          throw new Error(
+            'ENGINE_COMMAND_OUTCOME_UNKNOWN commandId=7: connexion interrompue',
+          );
+        }
+      });
+
+    render(<App />);
+
+    await waitFor(() => expect(
+      sendCommand.mock.calls.filter(([command]) => command.type === 'set-scene'),
+    ).toHaveLength(2));
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledWith({
+      version: 1,
+      type: 'set-audio-route',
+      captureProvider: 'external-render',
+      captureEndpointId: external.id,
+      outputDeviceId: physical.id,
+    }));
+    expect(sendCommand).toHaveBeenCalledWith({ version: 1, type: 'start' });
+  });
+
+  it('n’envoie qu’une commande lors d’un changement du mode fenêtres', async () => {
+    vi.spyOn(desktopBridge, 'loadConfig').mockResolvedValue(externalConfig());
+    vi.spyOn(desktopBridge, 'listAudioDevices').mockResolvedValue([external, physical]);
+    const sendCommand = vi.spyOn(desktopBridge, 'sendCommand').mockResolvedValue();
+
+    render(<App />);
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledWith({ version: 1, type: 'start' }));
+    sendCommand.mockClear();
+
+    act(() => useAppStore.getState().replaceWindowSpatialization({
+      ...structuredClone(defaultWindowSpatialization),
+      enabled: true,
+    }));
+
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'set-window-spatialization' }),
+    ));
+    expect(sendCommand.mock.calls.filter(([command]) =>
+      command.type === 'set-window-spatialization')).toHaveLength(1);
+    expect(sendCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'set-scene' }),
+    );
+  });
+
+  it('applique la scène stéréo avant le mode fenêtres lors d’une transition 5.1 combinée', async () => {
+    const config = externalConfig();
+    config.scene.captureEndpointId = externalSurround.id;
+    config.scene.inputLayout = '5.1-surround';
+    vi.spyOn(desktopBridge, 'loadConfig').mockResolvedValue(config);
+    vi.spyOn(desktopBridge, 'listAudioDevices').mockResolvedValue([externalSurround, physical]);
+    const sendCommand = vi.spyOn(desktopBridge, 'sendCommand').mockResolvedValue();
+
+    render(<App />);
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledWith({ version: 1, type: 'start' }));
+    sendCommand.mockClear();
+
+    act(() => {
+      const state = useAppStore.getState();
+      state.replaceScene({ ...state.scene, inputLayout: 'stereo' });
+      state.replaceWindowSpatialization({
+        ...state.windowSpatialization,
+        enabled: true,
+      });
+    });
+
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'set-window-spatialization' }),
+    ));
+    const commands = sendCommand.mock.calls.map(([command]) => command.type);
+    expect(commands).toEqual(['set-scene', 'set-window-spatialization']);
+  });
+
+  it('désactive le mode fenêtres avant d’appliquer une scène 5.1 combinée', async () => {
+    const config = externalConfig();
+    config.scene.captureEndpointId = externalSurround.id;
+    config.windowSpatialization.enabled = true;
+    vi.spyOn(desktopBridge, 'loadConfig').mockResolvedValue(config);
+    vi.spyOn(desktopBridge, 'listAudioDevices').mockResolvedValue([externalSurround, physical]);
+    const sendCommand = vi.spyOn(desktopBridge, 'sendCommand').mockResolvedValue();
+
+    render(<App />);
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledWith({ version: 1, type: 'start' }));
+    sendCommand.mockClear();
+
+    act(() => {
+      const state = useAppStore.getState();
+      state.replaceWindowSpatialization({
+        ...state.windowSpatialization,
+        enabled: false,
+      });
+      state.replaceScene({ ...state.scene, inputLayout: '5.1-surround' });
+    });
+
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'set-scene' }),
+    ));
+    expect(sendCommand.mock.calls.map(([command]) => command.type)).toEqual([
+      'set-window-spatialization',
+      'set-scene',
+    ]);
+  });
+
+  it('restaure le mode précédent quand le moteur refuse la spatialisation des fenêtres', async () => {
+    vi.spyOn(desktopBridge, 'loadConfig').mockResolvedValue(externalConfig());
+    vi.spyOn(desktopBridge, 'listAudioDevices').mockResolvedValue([external, physical]);
+    const sendCommand = vi.spyOn(desktopBridge, 'sendCommand').mockResolvedValue();
+
+    render(<App />);
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledWith({ version: 1, type: 'start' }));
+    sendCommand.mockImplementation(async (command) => {
+      if (command.type === 'set-window-spatialization' && command.config.enabled)
+        throw new Error('window spatialization requires the stereo input layout');
+    });
+
+    act(() => useAppStore.getState().replaceWindowSpatialization({
+      ...structuredClone(defaultWindowSpatialization),
+      enabled: true,
+    }));
+
+    await waitFor(() => expect(useAppStore.getState().windowSpatialization.enabled).toBe(false));
+    expect(useAppStore.getState().toasts.at(-1)).toMatchObject({
+      tone: 'warning',
+      title: 'Spatialisation des fenêtres non appliquée',
+    });
+  });
+
+  it('ne restaure pas une commande dont le résultat reste indéterminé après timeout', async () => {
+    vi.spyOn(desktopBridge, 'loadConfig').mockResolvedValue(externalConfig());
+    vi.spyOn(desktopBridge, 'listAudioDevices').mockResolvedValue([external, physical]);
+    const sendCommand = vi.spyOn(desktopBridge, 'sendCommand').mockResolvedValue();
+    const saveConfig = vi.mocked(desktopBridge.saveConfig);
+
+    render(<App />);
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledWith({ version: 1, type: 'start' }));
+    sendCommand.mockImplementation(async (command) => {
+      if (command.type === 'set-window-spatialization' && command.config.enabled) {
+        throw new Error(
+          'ENGINE_COMMAND_OUTCOME_UNKNOWN commandId=44: confirmation tardive',
+        );
+      }
+    });
+
+    act(() => useAppStore.getState().replaceWindowSpatialization({
+      ...structuredClone(defaultWindowSpatialization),
+      enabled: true,
+    }));
+
+    await waitFor(() => expect(useAppStore.getState().toasts.at(-1)).toMatchObject({
+      title: 'Confirmation moteur différée',
+    }));
+    expect(useAppStore.getState().windowSpatialization.enabled).toBe(true);
+    expect(saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      windowSpatialization: expect.objectContaining({ enabled: true }),
+    }));
+  });
+
+  it('affiche l’avertissement de persistance remonté par le bridge réel', async () => {
+    vi.spyOn(desktopBridge, 'loadConfig').mockResolvedValue(externalConfig());
+    vi.spyOn(desktopBridge, 'listAudioDevices').mockResolvedValue([external, physical]);
+    const sendCommand = vi.spyOn(desktopBridge, 'sendCommand').mockResolvedValue();
+    let emitWarning: ((detail: string) => void) | undefined;
+    vi.spyOn(desktopBridge, 'subscribeEngineCommandWarnings')
+      .mockImplementation((listener) => {
+        emitWarning = listener;
+        return () => undefined;
+      });
+
+    render(<App />);
+    await waitFor(() => expect(sendCommand).toHaveBeenCalledWith({ version: 1, type: 'start' }));
+    act(() => emitWarning?.(
+      'ENGINE_COMMAND_APPLIED_NOT_PERSISTED commandId=45: disque plein',
+    ));
+
+    await waitFor(() => expect(useAppStore.getState().toasts.at(-1)).toMatchObject({
+      title: 'Configuration appliquée, persistance moteur en échec',
+    }));
   });
 
   it('échoue fermé quand la source externe sauvegardée a disparu', async () => {
@@ -177,6 +486,7 @@ describe('bootstrap du routage audio', () => {
       connection: 'degraded',
       captureActive: true,
       renderActive: true,
+      connectionGeneration: 1,
       lastError: 'MMCSS unavailable; AUDIO_MODE_FALLBACK requested=exclusive-pro effective=shared-low-latency reason=format refused',
     });
 

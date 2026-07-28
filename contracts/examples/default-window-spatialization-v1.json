@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "enabled": false,
+  "maxSources": 8,
+  "stereoSpread": 0.72,
+  "followWindowPosition": true,
+  "displayCalibrations": [],
+  "sourceRules": []
+}

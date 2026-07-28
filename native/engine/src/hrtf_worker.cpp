@@ -97,8 +97,8 @@ private:
     std::atomic<std::uint64_t> published_generation_{};
     std::atomic<std::uint64_t> scene_revision_{};
     std::atomic<std::uintptr_t> database_{};
-    std::array<std::atomic<std::uint32_t>, kDirectionalSourceCount * 3> directions_{};
-    std::array<std::atomic<std::uint32_t>, kDirectionalSourceCount> gains_{};
+    std::array<std::atomic<std::uint32_t>, kMaximumBinauralSources * 3> directions_{};
+    std::array<std::atomic<std::uint32_t>, kMaximumBinauralSources> gains_{};
     std::atomic<std::uint32_t> source_count_{2};
     std::array<std::atomic<std::uint32_t>, 4> world_to_head_{};
     std::atomic<std::uint32_t> room_enabled_{};

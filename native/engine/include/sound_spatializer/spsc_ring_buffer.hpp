@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cstddef>
@@ -64,6 +65,33 @@ public:
         const std::size_t write = write_index_.load(std::memory_order_acquire);
         const std::size_t read = read_index_.load(std::memory_order_acquire);
         return write - read;
+    }
+
+    // Consumer-side bounded discard. Moving only the read cursor preserves the
+    // SPSC ownership model and lets a real-time consumer shed stale backlog in
+    // O(1), without touching or copying the stored frames.
+    [[nodiscard]] std::size_t discard_oldest(std::size_t count) noexcept {
+        const std::size_t read = read_index_.load(std::memory_order_relaxed);
+        const std::size_t write = write_index_.load(std::memory_order_acquire);
+        const std::size_t discarded = std::min(count, write - read);
+        read_index_.store(read + discarded, std::memory_order_release);
+        return discarded;
+    }
+
+    // A producer may snapshot this monotonic cursor before publishing a
+    // discontinuous packet. The consumer can subsequently discard exactly the
+    // older portion while retaining frames written after the boundary.
+    [[nodiscard]] std::size_t producer_sequence() const noexcept {
+        return write_index_.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] std::size_t discard_before(std::size_t producer_sequence) noexcept {
+        const std::size_t read = read_index_.load(std::memory_order_relaxed);
+        const std::size_t write = write_index_.load(std::memory_order_acquire);
+        const std::size_t target =
+            producer_sequence < read ? read : std::min(producer_sequence, write);
+        read_index_.store(target, std::memory_order_release);
+        return target - read;
     }
 
     [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }

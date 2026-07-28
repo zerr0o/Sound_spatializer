@@ -193,3 +193,37 @@ input[type='range'] { height: 3px; margin: 4px 0; border-radius: 3px; background
 .lfe-editor > span { display: flex; justify-content: space-between; color: #64757d; font-size: 7px; }
 .lfe-editor > span small { color: #c59a59; font-weight: 700; letter-spacing: .08em; }
 .lfe-editor > span i { font-style: normal; }
+
+/* Spatialisation stéréo par fenêtres */
+.spatial-input-mode { display: grid; gap: 7px; margin-bottom: 9px; padding: 2px 2px 10px; border-bottom: 1px solid var(--border); }
+.window-spatialization-editor { gap: 13px; }
+.window-runtime-summary { display: grid; grid-template-columns: 9px 1fr; align-items: center; gap: 8px; min-height: 42px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; background: rgba(255,255,255,.014); }
+.window-runtime-summary > span:last-child { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.window-runtime-summary small { color: #5d7178; font-size: 6.5px; font-weight: 750; letter-spacing: .09em; }
+.window-runtime-summary strong { overflow: hidden; color: #afbec2; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.runtime-dot { display: inline-block; width: 7px; height: 7px; border: 1px solid #4c5d65; border-radius: 50%; background: #28353b; box-shadow: 0 0 0 3px rgba(255,255,255,.018); }
+.runtime-dot.is-live { border-color: rgba(104,229,207,.7); background: var(--accent); box-shadow: 0 0 8px rgba(104,229,207,.42); }
+.window-section-heading { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--border); }
+.window-section-heading h2 { margin: 2px 0 0; font-size: 15px; }
+.window-count { display: grid; min-width: 24px; height: 22px; place-items: center; padding: 0 6px; color: var(--accent); border: 1px solid rgba(104,229,207,.18); border-radius: 11px; background: rgba(104,229,207,.045); font-size: 8px; font-weight: 700; }
+.window-empty-state { display: grid; justify-items: center; gap: 5px; padding: 21px 13px; color: #536970; border: 1px dashed #2b3a41; border-radius: 7px; text-align: center; }
+.window-empty-state strong { color: #82949a; font-size: 9px; }
+.window-empty-state small { max-width: 205px; color: #586a71; font-size: 7.5px; line-height: 1.45; }
+.display-selector, .window-source-selector { display: grid; gap: 5px; max-height: 172px; overflow-y: auto; }
+.display-selector button, .window-source-selector button { display: grid; align-items: center; gap: 8px; min-height: 45px; padding: 6px 8px; color: #6f8188; border: 1px solid var(--border); border-radius: 7px; background: rgba(255,255,255,.012); text-align: left; cursor: pointer; }
+.display-selector button { grid-template-columns: 18px minmax(0,1fr) auto; }
+.window-source-selector button { grid-template-columns: 9px minmax(0,1fr); }
+.display-selector button.is-selected, .window-source-selector button.is-selected { color: var(--accent); border-color: rgba(104,229,207,.24); background: rgba(104,229,207,.045); }
+.display-selector button > span, .window-source-selector button > span:last-child { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.display-selector strong, .window-source-selector strong { overflow: hidden; color: #a7b6ba; font-size: 8.5px; text-overflow: ellipsis; white-space: nowrap; }
+.display-selector small, .window-source-selector small { overflow: hidden; color: #5f7279; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+.display-selector i { color: #5f7978; font-size: 6px; font-style: normal; font-weight: 800; letter-spacing: .08em; }
+.display-calibration, .source-rule-editor { display: grid; gap: 11px; padding: 11px 9px; border: 1px solid var(--border); border-radius: 7px; background: rgba(255,255,255,.01); }
+.display-calibration > span { display: flex; align-items: center; justify-content: space-between; }
+.display-calibration > span small { color: #61747b; font-size: 6.5px; font-weight: 750; letter-spacing: .09em; }
+.display-calibration .text-link { padding: 0; border: 0; background: transparent; cursor: pointer; }
+.source-rule-actions { display: flex; justify-content: flex-end; padding-top: 2px; border-top: 1px solid var(--border); }
+.source-rule-actions .text-link { padding: 7px 0 0; color: var(--danger); border: 0; background: transparent; cursor: pointer; }
+.source-rule-actions .text-link:hover { color: #ff9d98; }
+.object-label.display-label { color: #84c6c3; border-color: rgba(104,229,207,.2); background: rgba(9,20,25,.84); white-space: nowrap; }
+.object-label.source-label { color: #b7c9cc; border-color: rgba(121,169,255,.2); background: rgba(9,20,25,.88); white-space: nowrap; }

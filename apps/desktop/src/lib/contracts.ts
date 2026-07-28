@@ -1,23 +1,25 @@
-import { defaultPreferences, defaultScene } from '../data/defaults';
+import { defaultPreferences, defaultScene, defaultWindowSpatialization } from '../data/defaults';
 import type {
   EngineCommandV1,
   EngineStatusV1,
   HeadPoseSampleV1,
-  PersistedAppConfigV2,
+  PersistedAppConfigV3,
   Quaternion,
   SceneConfigV2,
   SpeakerConfig,
   SpeakerSet,
   SurfaceAcoustics,
+  WindowSpatializationConfigV1,
 } from '../types/contracts';
 import type {
-  PersistedDesktopConfigV2,
+  PersistedDesktopConfigV3,
   WireEngineStatusV1,
   WireQuaternionWxyz,
   WireSceneConfigV1,
   WireSceneConfigV2,
   WireSpeakerChannelV2,
   WireSurface,
+  WireWindowSpatializationConfigV1,
 } from '../types/wire-contracts';
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -26,6 +28,13 @@ const vec = (value: readonly number[]): { x: number; y: number; z: number } => (
 const toVec = (value: { x: number; y: number; z: number }): [number, number, number] => [value.x, value.y, value.z];
 const isFiniteTuple = (value: unknown, length: number): value is number[] =>
   Array.isArray(value) && value.length === length && value.every((item) => typeof item === 'number' && Number.isFinite(item));
+const isApproximatelyUnitQuaternion = (value: unknown): value is WireQuaternionWxyz => {
+  if (!isFiniteTuple(value, 4)) return false;
+  const norm = Math.hypot(value[0], value[1], value[2], value[3]);
+  return norm >= 0.8 && norm <= 1.2;
+};
+const hasUniqueStrings = (values: readonly string[]) =>
+  new Set(values.map((value) => value.toLocaleLowerCase('en-US'))).size === values.length;
 
 const CHANNELS = ['L', 'R', 'C', 'LS', 'RS'] as const;
 const WIRE_CHANNELS: Record<(typeof CHANNELS)[number], WireSpeakerChannelV2> = {
@@ -38,6 +47,81 @@ const WIRE_CHANNELS: Record<(typeof CHANNELS)[number], WireSpeakerChannelV2> = {
 
 export const quaternionToWire = (q: Quaternion): WireQuaternionWxyz => [q.w, q.x, q.y, q.z];
 export const quaternionFromWire = (q: WireQuaternionWxyz): Quaternion => ({ x: q[1], y: q[2], z: q[3], w: q[0] });
+
+export const toWireWindowSpatializationConfig = (
+  config: WindowSpatializationConfigV1,
+): WireWindowSpatializationConfigV1 => ({
+  schemaVersion: 1,
+  enabled: config.enabled,
+  maxSources: Math.round(clamp(config.maxSources, 1, 8)),
+  stereoSpread: clamp(config.stereoSpread, 0, 1),
+  followWindowPosition: config.followWindowPosition,
+  displayCalibrations: config.displayCalibrations.slice(0, 16).map((display) => ({
+    displayId: display.displayId,
+    centerM: toVec(display.center),
+    widthM: clamp(display.widthM, 0.100001, 5),
+    heightM: clamp(display.heightM, 0.100001, 5),
+    orientation: quaternionToWire(display.orientation),
+  })),
+  sourceRules: config.sourceRules.slice(0, 64).map((rule) => ({
+    applicationId: rule.applicationId,
+    enabled: rule.enabled,
+    gainDb: clamp(rule.gainDb, -60, 12),
+    stereoSpread: clamp(rule.stereoSpread, 0, 1),
+    fallbackDisplayId: rule.fallbackDisplayId,
+  })),
+});
+
+export const isWireWindowSpatializationConfigV1 = (
+  value: unknown,
+): value is WireWindowSpatializationConfigV1 => {
+  if (!value || typeof value !== 'object') return false;
+  const config = value as Partial<WireWindowSpatializationConfigV1>;
+  return config.schemaVersion === 1 &&
+    typeof config.enabled === 'boolean' &&
+    Number.isInteger(config.maxSources) && (config.maxSources ?? 0) >= 1 && (config.maxSources ?? 0) <= 8 &&
+    typeof config.stereoSpread === 'number' && Number.isFinite(config.stereoSpread) &&
+    config.stereoSpread >= 0 && config.stereoSpread <= 1 &&
+    typeof config.followWindowPosition === 'boolean' &&
+    Array.isArray(config.displayCalibrations) && config.displayCalibrations.length <= 16 &&
+    config.displayCalibrations.every((display) =>
+      typeof display.displayId === 'string' && display.displayId.length > 0 &&
+      display.displayId.length <= 511 &&
+      isFiniteTuple(display.centerM, 3) &&
+      Number.isFinite(display.widthM) && display.widthM > 0.1 && display.widthM <= 5 &&
+      Number.isFinite(display.heightM) && display.heightM > 0.1 && display.heightM <= 5 &&
+      isApproximatelyUnitQuaternion(display.orientation)) &&
+    hasUniqueStrings(config.displayCalibrations.map((display) => display.displayId)) &&
+    Array.isArray(config.sourceRules) && config.sourceRules.length <= 64 &&
+    config.sourceRules.every((rule) =>
+      typeof rule.applicationId === 'string' && rule.applicationId.length > 0 &&
+      rule.applicationId.length <= 1023 &&
+      typeof rule.enabled === 'boolean' &&
+      Number.isFinite(rule.gainDb) && rule.gainDb >= -60 && rule.gainDb <= 12 &&
+      Number.isFinite(rule.stereoSpread) && rule.stereoSpread >= 0 && rule.stereoSpread <= 1 &&
+      (rule.fallbackDisplayId === null ||
+        (typeof rule.fallbackDisplayId === 'string' &&
+          rule.fallbackDisplayId.length <= 511))) &&
+    hasUniqueStrings(config.sourceRules.map((rule) => rule.applicationId));
+};
+
+export const fromWireWindowSpatializationConfig = (
+  wire: WireWindowSpatializationConfigV1,
+): WindowSpatializationConfigV1 => ({
+  version: 1,
+  enabled: wire.enabled,
+  maxSources: wire.maxSources,
+  stereoSpread: wire.stereoSpread,
+  followWindowPosition: wire.followWindowPosition,
+  displayCalibrations: wire.displayCalibrations.map((display) => ({
+    displayId: display.displayId,
+    center: vec(display.centerM),
+    widthM: display.widthM,
+    heightM: display.heightM,
+    orientation: quaternionFromWire(display.orientation),
+  })),
+  sourceRules: wire.sourceRules.map((rule) => ({ ...rule })),
+});
 
 const toWireSurface = (surface: SurfaceAcoustics): WireSurface => ({
   materialId: surface.materialId,
@@ -289,16 +373,22 @@ export const fromWireSceneConfig = (wire: WireSceneConfigV2): SceneConfigV2 => {
   };
 };
 
-export const toPersistedDesktopConfig = (config: PersistedAppConfigV2): PersistedDesktopConfigV2 => ({
-  schemaVersion: 2,
+export const toPersistedDesktopConfig = (config: PersistedAppConfigV3): PersistedDesktopConfigV3 => ({
+  schemaVersion: 3,
   scene: toWireSceneConfig(config.scene),
   preferences: config.preferences,
+  windowSpatialization: toWireWindowSpatializationConfig(config.windowSpatialization),
 });
 
-export const migratePersistedConfig = (value: unknown): PersistedAppConfigV2 | null => {
+export const migratePersistedConfig = (value: unknown): PersistedAppConfigV3 | null => {
   if (!value || typeof value !== 'object') return null;
-  const candidate = value as { schemaVersion?: unknown; scene?: unknown; preferences?: unknown };
-  if (candidate.schemaVersion !== 1 && candidate.schemaVersion !== 2) return null;
+  const candidate = value as {
+    schemaVersion?: unknown;
+    scene?: unknown;
+    preferences?: unknown;
+    windowSpatialization?: unknown;
+  };
+  if (candidate.schemaVersion !== 1 && candidate.schemaVersion !== 2 && candidate.schemaVersion !== 3) return null;
   const rawPreferences = candidate.preferences && typeof candidate.preferences === 'object'
     ? candidate.preferences as Partial<typeof defaultPreferences>
     : {};
@@ -311,11 +401,39 @@ export const migratePersistedConfig = (value: unknown): PersistedAppConfigV2 | n
     minimizeToTray: typeof rawPreferences.minimizeToTray === 'boolean' ? rawPreferences.minimizeToTray : defaultPreferences.minimizeToTray,
     showCameraPreview: typeof rawPreferences.showCameraPreview === 'boolean' ? rawPreferences.showCameraPreview : defaultPreferences.showCameraPreview,
   };
+  if (
+    candidate.schemaVersion === 3 &&
+    isWireSceneConfigV2(candidate.scene) &&
+    isWireWindowSpatializationConfigV1(candidate.windowSpatialization)
+  ) {
+    const scene = fromWireSceneConfig(candidate.scene);
+    const windowSpatialization =
+      fromWireWindowSpatializationConfig(candidate.windowSpatialization);
+    // Per-process mode deliberately preserves each application's L/R pair.
+    // Never revive an impossible persisted 5.1 + window-mode combination.
+    if (scene.inputLayout !== 'stereo') windowSpatialization.enabled = false;
+    return {
+      schemaVersion: 3,
+      scene,
+      preferences,
+      windowSpatialization,
+    };
+  }
   if (candidate.schemaVersion === 2 && isWireSceneConfigV2(candidate.scene)) {
-    return { schemaVersion: 2, scene: fromWireSceneConfig(candidate.scene), preferences };
+    return {
+      schemaVersion: 3,
+      scene: fromWireSceneConfig(candidate.scene),
+      preferences,
+      windowSpatialization: structuredClone(defaultWindowSpatialization),
+    };
   }
   if (candidate.schemaVersion === 1 && isWireSceneConfigV1(candidate.scene)) {
-    return { schemaVersion: 2, scene: fromWireSceneConfigV1(candidate.scene), preferences };
+    return {
+      schemaVersion: 3,
+      scene: fromWireSceneConfigV1(candidate.scene),
+      preferences,
+      windowSpatialization: structuredClone(defaultWindowSpatialization),
+    };
   }
 
   // Migration des scènes wire écrites avant l'introduction de la diffusion par bande.
@@ -334,7 +452,12 @@ export const migratePersistedConfig = (value: unknown): PersistedAppConfigV2 | n
         return surface;
       });
       if (candidate.schemaVersion === 1 && isWireSceneConfigV1(migratedWire)) {
-        return { schemaVersion: 2, scene: fromWireSceneConfigV1(migratedWire), preferences };
+        return {
+          schemaVersion: 3,
+          scene: fromWireSceneConfigV1(migratedWire),
+          preferences,
+          windowSpatialization: structuredClone(defaultWindowSpatialization),
+        };
       }
     }
   }
@@ -375,7 +498,12 @@ export const migratePersistedConfig = (value: unknown): PersistedAppConfigV2 | n
       ? legacy.captureEndpointId
       : null,
     };
-    return { schemaVersion: 2, scene, preferences };
+    return {
+      schemaVersion: 3,
+      scene,
+      preferences,
+      windowSpatialization: structuredClone(defaultWindowSpatialization),
+    };
   }
   return null;
 };
@@ -395,6 +523,13 @@ export const toWireEngineCommand = (command: EngineCommandV1): unknown => {
     };
   }
   if (command.type === 'set-audio-mode') return { schemaVersion: 1, type: command.type, mode: command.mode };
+  if (command.type === 'set-window-spatialization') {
+    return {
+      schemaVersion: 1,
+      type: command.type,
+      config: toWireWindowSpatializationConfig(command.config),
+    };
+  }
   if (command.type === 'set-hrtf') return { schemaVersion: 1, type: command.type, profileId: command.profileId, sofaPath: command.sofaPath };
   if (command.type === 'set-headphone-eq') {
     return {
@@ -418,6 +553,34 @@ export const toWireEngineCommand = (command: EngineCommandV1): unknown => {
   return { schemaVersion: 1, type: command.type };
 };
 
+const isWireDisplayRuntimeInfo = (value: unknown): boolean => {
+  if (!value || typeof value !== 'object') return false;
+  const display = value as NonNullable<WireEngineStatusV1['windowAudio']>['displays'][number];
+  const bounds = display.boundsPx;
+  return typeof display.id === 'string' && display.id.length > 0 &&
+    typeof display.name === 'string' && typeof display.isPrimary === 'boolean' &&
+    bounds !== null && typeof bounds === 'object' &&
+    [bounds.left, bounds.top, bounds.right, bounds.bottom].every((entry) => Number.isFinite(entry)) &&
+    bounds.right > bounds.left && bounds.bottom > bounds.top &&
+    isFiniteTuple(display.centerM, 3) && Number.isFinite(display.widthM) && Number.isFinite(display.heightM) &&
+    isFiniteTuple(display.orientation, 4);
+};
+
+const isWireWindowAudioSourceInfo = (value: unknown): boolean => {
+  if (!value || typeof value !== 'object') return false;
+  const source = value as NonNullable<WireEngineStatusV1['windowAudio']>['windowSources'][number];
+  return typeof source.sourceId === 'string' && source.sourceId.length > 0 &&
+    typeof source.applicationId === 'string' && source.applicationId.length > 0 &&
+    typeof source.applicationName === 'string' && typeof source.windowTitle === 'string' &&
+    Number.isInteger(source.processId) && source.processId >= 0 &&
+    typeof source.displayId === 'string' &&
+    typeof source.active === 'boolean' &&
+    isFiniteTuple(source.leftPositionM, 3) && isFiniteTuple(source.rightPositionM, 3) &&
+    Number.isFinite(source.gainDb) && Number.isFinite(source.sampleRate) &&
+    Number.isInteger(source.channelCount) && source.channelCount >= 0 &&
+    ['inactive', 'activating', 'capturing', 'unsupported-format', 'failed'].includes(source.captureState);
+};
+
 export const isWireEngineStatusV1 = (value: unknown): value is WireEngineStatusV1 => {
   if (!value || typeof value !== 'object') return false;
   const status = value as Partial<WireEngineStatusV1>;
@@ -431,12 +594,37 @@ export const isWireEngineStatusV1 = (value: unknown): value is WireEngineStatusV
     'latencyP95Ms', 'resampleRatio',
   ];
   return status.schemaVersion === 1 &&
+    (status.desktopConnectionGeneration === undefined ||
+      (Number.isSafeInteger(status.desktopConnectionGeneration) &&
+        status.desktopConnectionGeneration >= 0)) &&
     typeof status.audioMode === 'string' && ['shared-low-latency', 'exclusive-pro', 'compatibility'].includes(status.audioMode) &&
     (status.renderSampleFormat === undefined ||
       (typeof status.renderSampleFormat === 'string' && sampleFormats.has(status.renderSampleFormat))) &&
     (status.inputLayout === undefined || (typeof status.inputLayout === 'string' && inputLayouts.has(status.inputLayout))) &&
+    (status.spatialInputMode === undefined ||
+      status.spatialInputMode === 'endpoint-mix' || status.spatialInputMode === 'process-windows') &&
+    (status.requestedSpatialInputMode === undefined ||
+      status.requestedSpatialInputMode === 'endpoint-mix' ||
+      status.requestedSpatialInputMode === 'process-windows') &&
     (status.captureChannels === undefined || (Number.isInteger(status.captureChannels) && status.captureChannels >= 0)) &&
     (status.captureChannelMask === undefined || (Number.isInteger(status.captureChannelMask) && status.captureChannelMask >= 0)) &&
+    (status.windowAudio === undefined ||
+      (typeof status.windowAudio.supported === 'boolean' &&
+        typeof status.windowAudio.running === 'boolean' &&
+        Number.isInteger(status.windowAudio.sourceCount) && status.windowAudio.sourceCount >= 0 &&
+        Number.isInteger(status.windowAudio.sequence) && status.windowAudio.sequence >= 0 &&
+        Array.isArray(status.windowAudio.displays) && status.windowAudio.displays.length <= 16 &&
+        status.windowAudio.displays.every(isWireDisplayRuntimeInfo) &&
+        Array.isArray(status.windowAudio.windowSources) && status.windowAudio.windowSources.length <= 8 &&
+        status.windowAudio.windowSources.every(isWireWindowAudioSourceInfo) &&
+        status.windowAudio.diagnostics !== null && typeof status.windowAudio.diagnostics === 'object' &&
+        (status.windowAudio.diagnostics.fifoOverruns === undefined ||
+          (Number.isInteger(status.windowAudio.diagnostics.fifoOverruns) &&
+            status.windowAudio.diagnostics.fifoOverruns >= 0)) &&
+        (status.windowAudio.diagnostics.fifoUnderruns === undefined ||
+          (Number.isInteger(status.windowAudio.diagnostics.fifoUnderruns) &&
+            status.windowAudio.diagnostics.fifoUnderruns >= 0)) &&
+        typeof status.windowAudio.diagnostics.lastError === 'string')) &&
     typeof status.captureState === 'string' && streamStates.has(status.captureState) &&
     typeof status.renderState === 'string' && streamStates.has(status.renderState) &&
     typeof status.trackingState === 'string' && trackingStates.has(status.trackingState) &&
@@ -456,9 +644,13 @@ export const fromWireEngineStatus = (wire: WireEngineStatusV1): EngineStatusV1 =
   const fifoReference = Math.max(1, wire.renderPeriodFrames * 4);
   return {
     version: 1,
+    connectionGeneration: wire.desktopConnectionGeneration ?? 0,
     audioMode: wire.audioMode,
     renderSampleFormat: wire.renderSampleFormat ?? 'unknown',
     inputLayout: wire.inputLayout ?? 'stereo',
+    spatialInputMode: wire.spatialInputMode ?? 'endpoint-mix',
+    requestedSpatialInputMode:
+      wire.requestedSpatialInputMode ?? wire.spatialInputMode ?? 'endpoint-mix',
     captureChannels: wire.captureChannels ?? 2,
     captureChannelMask: wire.captureChannelMask ?? 0x3,
     connection: failed ? 'error' : degraded ? 'degraded' : captureRunning && renderRunning ? 'ready' : starting ? 'connecting' : 'offline',
@@ -481,6 +673,46 @@ export const fromWireEngineStatus = (wire: WireEngineStatusV1): EngineStatusV1 =
     clockDriftPpm: (finite(wire.resampleRatio, 1) - 1) * 1_000_000,
     uptimeSeconds: 0,
     potentiallyBinaural: wire.potentiallyBinaural,
+    windowAudio: {
+      supported: wire.windowAudio?.supported ?? false,
+      running: wire.windowAudio?.running ?? false,
+      sourceCount: wire.windowAudio?.sourceCount ?? 0,
+      fifoOverruns: wire.windowAudio?.diagnostics.fifoOverruns ?? 0,
+      fifoUnderruns: wire.windowAudio?.diagnostics.fifoUnderruns ?? 0,
+      displays: (wire.windowAudio?.displays ?? []).map((display) => ({
+        displayId: display.id,
+        name: display.name,
+        isPrimary: display.isPrimary,
+        boundsPx: {
+          x: display.boundsPx.left,
+          y: display.boundsPx.top,
+          width: display.boundsPx.right - display.boundsPx.left,
+          height: display.boundsPx.bottom - display.boundsPx.top,
+        },
+        rotationDegrees: 0,
+        center: vec(display.centerM),
+        widthM: display.widthM,
+        heightM: display.heightM,
+        orientation: quaternionFromWire(display.orientation),
+        calibrated: false,
+      })),
+      windowSources: (wire.windowAudio?.windowSources ?? []).map((source) => ({
+        sourceId: source.sourceId,
+        applicationId: source.applicationId,
+        applicationName: source.applicationName,
+        windowTitle: source.windowTitle,
+        processId: source.processId,
+        displayId: source.displayId || null,
+        active: source.active,
+        leftPosition: vec(source.leftPositionM),
+        rightPosition: vec(source.rightPositionM),
+        gainDb: source.gainDb,
+        sampleRate: source.sampleRate,
+        channelCount: source.channelCount,
+        captureState: source.captureState,
+      })),
+      lastError: wire.windowAudio?.diagnostics.lastError || null,
+    },
     lastError: wire.lastError || null,
   };
 };

@@ -4,7 +4,18 @@ import { Component, type ErrorInfo, type PropsWithChildren, useMemo, useRef } fr
 import * as THREE from 'three';
 import { Box, Rotate3D } from 'lucide-react';
 import { isSpeakerRouted, SPEAKER_COLORS } from '../../lib/speaker-layout';
-import type { Channel, HeadPoseSampleV1, InputLayout, ListenerConfig, RoomConfig, SpeakerConfig, SpeakerSet } from '../../types/contracts';
+import type {
+  Channel,
+  DisplayRuntimeInfo,
+  HeadPoseSampleV1,
+  InputLayout,
+  ListenerConfig,
+  RoomConfig,
+  SpatialInputMode,
+  SpeakerConfig,
+  SpeakerSet,
+  WindowAudioSourceInfo,
+} from '../../types/contracts';
 
 function Speaker({ speaker, selected, routed, onSelect }: { speaker: SpeakerConfig; selected: boolean; routed: boolean; onSelect: () => void }) {
   const color = SPEAKER_COLORS[speaker.channel];
@@ -154,12 +165,107 @@ function RoomOutline({ room }: { room: RoomConfig }) {
   );
 }
 
+function DisplayPlane({ display }: { display: DisplayRuntimeInfo }) {
+  const orientation: [number, number, number, number] = [
+    -display.orientation.x,
+    -display.orientation.y,
+    display.orientation.z,
+    display.orientation.w,
+  ];
+  return (
+    <group
+      position={[display.center.x, display.center.y, -display.center.z]}
+      quaternion={orientation}
+    >
+      <RoundedBox args={[display.widthM + 0.045, display.heightM + 0.045, 0.035]} radius={0.025} smoothness={3}>
+        <meshStandardMaterial color="#15242c" metalness={0.45} roughness={0.36} />
+      </RoundedBox>
+      <mesh position={[0, 0, -0.021]}>
+        <planeGeometry args={[display.widthM, display.heightM]} />
+        <meshStandardMaterial
+          color={display.isPrimary ? '#163b3b' : '#172b3d'}
+          emissive={display.isPrimary ? '#55d9c5' : '#668dff'}
+          emissiveIntensity={0.11}
+          roughness={0.68}
+        />
+      </mesh>
+      <Html center position={[0, display.heightM / 2 + 0.13, 0]} distanceFactor={6} style={{ pointerEvents: 'none' }}>
+        <span className="object-label display-label">
+          {display.name}{display.isPrimary ? ' · PRINCIPAL' : ''}
+        </span>
+      </Html>
+    </group>
+  );
+}
+
+function WindowSource({
+  source,
+  listener,
+}: {
+  source: WindowAudioSourceInfo;
+  listener: ListenerConfig;
+}) {
+  const channels = [
+    { key: 'L', color: SPEAKER_COLORS.L, position: source.leftPosition },
+    { key: 'R', color: SPEAKER_COLORS.R, position: source.rightPosition },
+  ] as const;
+  return (
+    <group>
+      {channels.map((channel) => (
+        <group key={channel.key}>
+          <Line
+            points={[
+              [channel.position.x, channel.position.y, -channel.position.z],
+              [listener.position.x, listener.position.y, -listener.position.z],
+            ]}
+            color={channel.color}
+            lineWidth={1}
+            transparent
+            opacity={source.active ? 0.45 : 0.12}
+            dashed
+            dashScale={1.4}
+            dashSize={0.08}
+            gapSize={0.07}
+          />
+          <mesh position={[channel.position.x, channel.position.y, -channel.position.z]}>
+            <sphereGeometry args={[0.075, 20, 16]} />
+            <meshStandardMaterial
+              color={channel.color}
+              emissive={channel.color}
+              emissiveIntensity={source.active ? 0.72 : 0.08}
+              transparent
+              opacity={source.active ? 1 : 0.38}
+            />
+          </mesh>
+        </group>
+      ))}
+      <Html
+        center
+        position={[
+          (source.leftPosition.x + source.rightPosition.x) / 2,
+          Math.max(source.leftPosition.y, source.rightPosition.y) + 0.16,
+          -(source.leftPosition.z + source.rightPosition.z) / 2,
+        ]}
+        distanceFactor={6}
+        style={{ pointerEvents: 'none' }}
+      >
+        <span className="object-label source-label">
+          {source.applicationName || source.windowTitle || `PID ${source.processId}`} · L/R
+        </span>
+      </Html>
+    </group>
+  );
+}
+
 interface SceneProps {
   speakers: SpeakerSet;
   listener: ListenerConfig;
   room: RoomConfig;
   pose: HeadPoseSampleV1 | null;
   inputLayout: InputLayout;
+  spatialInputMode: SpatialInputMode;
+  displays: DisplayRuntimeInfo[];
+  windowSources: WindowAudioSourceInfo[];
   selectedSpeaker: Channel;
   onSelectSpeaker: (id: Channel) => void;
 }
@@ -179,7 +285,7 @@ export function SpatialScene(props: SceneProps) {
         <directionalLight position={[2, 7, 4]} intensity={2.1} color="#dff8ff" castShadow shadow-mapSize={[1024, 1024]} />
         <pointLight position={[-4, 2.5, -2]} intensity={6} distance={7} color="#57dac4" />
         <pointLight position={[4, 2.5, -2]} intensity={5} distance={7} color="#668dff" />
-        <RoomOutline room={props.room} />
+        {props.spatialInputMode === 'endpoint-mix' && <RoomOutline room={props.room} />}
         <Grid
           position={[0, 0.015, -1.8]}
           args={[12, 12]}
@@ -193,12 +299,19 @@ export function SpatialScene(props: SceneProps) {
           fadeStrength={1.2}
           infiniteGrid
         />
-        {props.speakers.map((speaker) => (
-          <group key={speaker.id}>
-            <Speaker speaker={speaker} selected={props.selectedSpeaker === speaker.id} routed={isSpeakerRouted(props.inputLayout, speaker.id)} onSelect={() => props.onSelectSpeaker(speaker.id)} />
-            {isSpeakerRouted(props.inputLayout, speaker.id) && !speaker.muted && <SoundPath speaker={speaker} listener={props.listener} />}
-          </group>
-        ))}
+        {props.spatialInputMode === 'endpoint-mix'
+          ? props.speakers.map((speaker) => (
+            <group key={speaker.id}>
+              <Speaker speaker={speaker} selected={props.selectedSpeaker === speaker.id} routed={isSpeakerRouted(props.inputLayout, speaker.id)} onSelect={() => props.onSelectSpeaker(speaker.id)} />
+              {isSpeakerRouted(props.inputLayout, speaker.id) && !speaker.muted && <SoundPath speaker={speaker} listener={props.listener} />}
+            </group>
+          ))
+          : (
+            <>
+              {props.displays.map((display) => <DisplayPlane key={display.displayId} display={display} />)}
+              {props.windowSources.map((source) => <WindowSource key={source.sourceId} source={source} listener={props.listener} />)}
+            </>
+          )}
         <Listener pose={props.pose} listener={props.listener} />
         <ContactShadows position={[0, 0.01, 0]} opacity={0.36} scale={10} blur={2.4} far={4} />
         <OrbitControls

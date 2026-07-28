@@ -41,6 +41,9 @@ struct AudioBackendDiagnostics {
     std::uint64_t render_underruns{};
     float callback_cpu_percent{};
     float resample_ratio{1.0F};
+    // Canonical endpoint selected by the backend after marker/ID resolution.
+    // Process-loopback discovery must use this exact render endpoint.
+    std::string capture_endpoint_id{};
     std::string last_error{};
 };
 

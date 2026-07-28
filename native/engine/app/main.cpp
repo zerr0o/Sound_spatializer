@@ -32,12 +32,14 @@ public:
     RuntimeHandler(sound_spatializer::SpatialAudioEngine& engine, sound_spatializer::ConfigStore& config_store)
         : engine_(engine), config_store_(config_store) {}
 
-    void on_engine_command(const sound_spatializer::EngineCommandV1& command) override {
+    [[nodiscard]] CommandResult on_engine_command(
+        const sound_spatializer::EngineCommandV1& command) override {
         std::string error;
         if (!engine_.execute_command(command, error)) {
             std::cerr << "Engine command rejected: " << error << '\n';
-            return;
+            return {false, false, std::move(error)};
         }
+        bool persisted = true;
         // `start` can replace a requested exclusive mode with its effective
         // shared fallback, so it is scene-mutating for persistence purposes.
         if (command.type == sound_spatializer::EngineCommandType::start ||
@@ -49,8 +51,21 @@ public:
             command.type == sound_spatializer::EngineCommandType::set_hrtf ||
             command.type == sound_spatializer::EngineCommandType::set_headphone_eq ||
             command.type == sound_spatializer::EngineCommandType::set_audio_route) {
-            if (!config_store_.save_scene(engine_.scene(), error)) std::cerr << "Config save failed: " << error << '\n';
+            if (!config_store_.save_scene(engine_.scene(), error)) {
+                persisted = false;
+                std::cerr << "Config save failed: " << error << '\n';
+            }
         }
+        if (command.type ==
+            sound_spatializer::EngineCommandType::set_window_spatialization) {
+            if (!config_store_.save_window_audio_config(
+                    engine_.window_spatialization(), error)) {
+                persisted = false;
+                std::cerr << "Window spatialization config save failed: "
+                          << error << '\n';
+            }
+        }
+        return {true, persisted, persisted ? std::string{} : std::move(error)};
     }
 
     void on_head_pose(const sound_spatializer::HeadPoseSampleV1& pose) override { engine_.submit_head_pose(pose); }
@@ -105,6 +120,12 @@ int run_engine(const std::vector<std::string>& arguments) {
         std::string error;
         if (!engine->set_scene(*loaded.value, error)) std::cerr << "Stored scene rejected: " << error << '\n';
         else loaded_valid_scene = true;
+    }
+    if (auto loaded = config_store.load_window_audio_config(); loaded) {
+        std::string error;
+        if (!engine->set_window_spatialization(*loaded.value, error))
+            std::cerr << "Stored window spatialization config rejected: "
+                      << error << '\n';
     }
 
     if (diagnostics_once) {

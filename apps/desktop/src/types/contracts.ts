@@ -1,9 +1,11 @@
 export const CONTRACT_VERSION = 1 as const;
 export const SCENE_CONFIG_VERSION = 2 as const;
+export const WINDOW_SPATIALIZATION_CONFIG_VERSION = 1 as const;
 
 export type ViewId = 'assistant' | 'scene' | 'profiles' | 'diagnostics';
 export type Channel = 'L' | 'R' | 'C' | 'LS' | 'RS';
 export type InputLayout = 'stereo' | '5.1-surround';
+export type SpatialInputMode = 'endpoint-mix' | 'process-windows';
 export type TrackingState = 'tracked' | 'held' | 'returning' | 'lost';
 export type AudioMode = 'shared-low-latency' | 'exclusive-pro' | 'compatibility';
 export type CaptureProvider = 'native-driver' | 'external-render';
@@ -123,6 +125,88 @@ export interface SceneConfigV2 {
   room: RoomConfig;
 }
 
+export interface DisplayBoundsPx {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Écran découvert par le moteur Win32. Les coordonnées physiques sont celles
+ * effectivement utilisées pour placer les sources dans le monde HRTF.
+ */
+export interface DisplayRuntimeInfo {
+  displayId: string;
+  name: string;
+  isPrimary: boolean;
+  boundsPx: DisplayBoundsPx;
+  rotationDegrees: 0 | 90 | 180 | 270;
+  center: Vector3;
+  widthM: number;
+  heightM: number;
+  orientation: Quaternion;
+  calibrated: boolean;
+}
+
+/** Une session audio stéréo associée à la fenêtre choisie par le moteur. */
+export interface WindowAudioSourceInfo {
+  sourceId: string;
+  applicationId: string;
+  applicationName: string;
+  windowTitle: string;
+  processId: number;
+  displayId: string | null;
+  active: boolean;
+  leftPosition: Vector3;
+  rightPosition: Vector3;
+  gainDb: number;
+  sampleRate: number;
+  channelCount: number;
+  captureState: 'inactive' | 'activating' | 'capturing' | 'unsupported-format' | 'failed';
+}
+
+export interface WindowAudioRuntimeStatus {
+  supported: boolean;
+  running: boolean;
+  sourceCount: number;
+  /** Paquets perdus parce qu'une FIFO de capture process-loopback était pleine. */
+  fifoOverruns: number;
+  /** Lectures sans assez de PCM dans une FIFO de capture process-loopback. */
+  fifoUnderruns: number;
+  displays: DisplayRuntimeInfo[];
+  windowSources: WindowAudioSourceInfo[];
+  lastError: string | null;
+}
+
+export interface DisplaySpatialCalibration {
+  displayId: string;
+  center: Vector3;
+  widthM: number;
+  heightM: number;
+  orientation: Quaternion;
+}
+
+export interface WindowSourceRule {
+  applicationId: string;
+  enabled: boolean;
+  gainDb: number;
+  stereoSpread: number;
+  fallbackDisplayId: string | null;
+}
+
+export interface WindowSpatializationConfigV1 {
+  version: typeof WINDOW_SPATIALIZATION_CONFIG_VERSION;
+  enabled: boolean;
+  /** Nombre maximal de sessions simultanées ; le moteur borne cette valeur à huit. */
+  maxSources: number;
+  /** Largeur stéréo globale, de mono centré (0) à toute la largeur de la fenêtre (1). */
+  stereoSpread: number;
+  followWindowPosition: boolean;
+  displayCalibrations: DisplaySpatialCalibration[];
+  sourceRules: WindowSourceRule[];
+}
+
 export interface AudioDeviceSummary {
   id: string;
   name: string;
@@ -136,11 +220,17 @@ export interface AudioDeviceSummary {
 
 export interface EngineStatusV1 {
   version: typeof CONTRACT_VERSION;
+  /** Monotonic desktop pipe generation used to replay state after engine restart. */
+  connectionGeneration: number;
   /** Mode réellement ouvert par WASAPI, qui peut différer du mode demandé après un fallback. */
   audioMode: AudioMode;
   /** Représentation réellement écrite dans le tampon du périphérique physique. */
   renderSampleFormat: 'unknown' | 'float32' | 'pcm-s32';
   inputLayout: InputLayout;
+  /** Path used by the latest audio callback. */
+  spatialInputMode: SpatialInputMode;
+  /** User-requested path, even while process capture is still activating. */
+  requestedSpatialInputMode: SpatialInputMode;
   captureChannels: number;
   captureChannelMask: number;
   connection: EngineConnectionState;
@@ -163,6 +253,7 @@ export interface EngineStatusV1 {
   clockDriftPpm: number;
   uptimeSeconds: number;
   potentiallyBinaural: boolean;
+  windowAudio: WindowAudioRuntimeStatus;
   lastError: string | null;
 }
 
@@ -179,6 +270,7 @@ export type EngineCommandV1 =
       outputDeviceId: string;
     }
   | { version: 1; type: 'set-audio-mode'; mode: AudioMode }
+  | { version: 1; type: 'set-window-spatialization'; config: WindowSpatializationConfigV1 }
   | { version: 1; type: 'calibrate-neutral-pose'; quaternion: Quaternion }
   | { version: 1; type: 'set-scene'; scene: SceneConfigV2 }
   | { version: 1; type: 'set-hrtf'; profileId: string; sofaPath: string | null }
@@ -209,6 +301,13 @@ export interface PersistedAppConfigV2 {
   schemaVersion: 2;
   scene: SceneConfigV2;
   preferences: AppPreferences;
+}
+
+export interface PersistedAppConfigV3 {
+  schemaVersion: 3;
+  scene: SceneConfigV2;
+  preferences: AppPreferences;
+  windowSpatialization: WindowSpatializationConfigV1;
 }
 
 export interface QpcSnapshot {

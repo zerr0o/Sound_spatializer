@@ -25,8 +25,15 @@ pnpm build:ui
 Pour travailler dans la fenêtre native Tauri avec le serveur Vite :
 
 ```powershell
+pnpm build:engine:debug
 pnpm --dir apps/desktop tauri dev
 ```
+
+Le premier appel construit le moteur Debug avec libmysofa. L'hôte Tauri Debug
+préfère `build/engine-mysofa/Debug/SoundSpatializer.Engine.exe` à une copie
+ancienne dans `target/debug`; relancez la commande après toute modification
+native. `pnpm build:engine:dev` fournit sinon une variante analytique plus légère
+sans import SOFA.
 
 `pnpm build:frontend` ne construit que les fichiers web. `pnpm build:ui` passe
 obligatoirement par `tauri build --no-bundle --features custom-protocol`, fusionne

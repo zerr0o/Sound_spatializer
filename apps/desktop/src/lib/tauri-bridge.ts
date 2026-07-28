@@ -7,7 +7,7 @@ import type {
   HeadPoseSampleV1,
   ImportedHeadphoneEq,
   ImportedSofa,
-  PersistedAppConfigV2,
+  PersistedAppConfigV3,
   QpcSnapshot,
 } from '../types/contracts';
 import { demoAudioDevices, emptyEngineStatus } from '../data/defaults';
@@ -16,10 +16,43 @@ import { LatestValueQueue } from './latest-value-queue';
 
 export const isTauriRuntime = () => '__TAURI_INTERNALS__' in window;
 
+const CONFIG_KEY_V3 = 'sound-spatializer.config.v3';
 const CONFIG_KEY_V2 = 'sound-spatializer.config.v2';
 const CONFIG_KEY_V1 = 'sound-spatializer.config.v1';
 type PoseDeliveryListener = (error: unknown | null) => void;
 const poseDeliveryListeners = new Set<PoseDeliveryListener>();
+type EngineCommandWarningListener = (detail: string) => void;
+const engineCommandWarningListeners = new Set<EngineCommandWarningListener>();
+let engineCommandQueue: Promise<void> = Promise.resolve();
+
+const enqueueEngineCommandOperation = <T>(
+  operation: () => Promise<T>,
+): Promise<T> => {
+  const result = engineCommandQueue.then(operation, operation);
+  engineCommandQueue = result.then(() => undefined, () => undefined);
+  return result;
+};
+
+const sendEngineCommandNow = async (command: EngineCommandV1): Promise<number> => {
+  if (!isTauriRuntime()) return 0;
+  const payload = JSON.stringify(toWireEngineCommand(command));
+  try {
+    return await invoke<number>('send_engine_command', { payload });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (detail.startsWith('ENGINE_COMMAND_APPLIED_NOT_PERSISTED ')) {
+      for (const listener of engineCommandWarningListeners) listener(detail);
+      // The command was applied, but the error response carries no trustworthy
+      // ACK generation. Keep the existing void API successful while forcing
+      // generation-aware bootstrap callers to replay.
+      return 0;
+    }
+    // Never retry an indeterminate command with a fresh ID here: a newer
+    // start/stop/route command may already have overtaken it.
+    throw error;
+  }
+};
+
 const poseQueue = new LatestValueQueue<Uint8Array>(
   (payload) => invoke('push_head_pose', payload),
   {
@@ -33,19 +66,21 @@ const poseQueue = new LatestValueQueue<Uint8Array>(
 );
 
 export const desktopBridge = {
-  async loadConfig(): Promise<PersistedAppConfigV2 | null> {
+  async loadConfig(): Promise<PersistedAppConfigV3 | null> {
     if (!isTauriRuntime()) {
-      const value = window.localStorage.getItem(CONFIG_KEY_V2) ?? window.localStorage.getItem(CONFIG_KEY_V1);
+      const value = window.localStorage.getItem(CONFIG_KEY_V3) ??
+        window.localStorage.getItem(CONFIG_KEY_V2) ??
+        window.localStorage.getItem(CONFIG_KEY_V1);
       return value ? migratePersistedConfig(JSON.parse(value)) : null;
     }
     const value = await invoke<string | null>('load_app_config');
     return value ? migratePersistedConfig(JSON.parse(value)) : null;
   },
 
-  async saveConfig(config: PersistedAppConfigV2): Promise<void> {
+  async saveConfig(config: PersistedAppConfigV3): Promise<void> {
     const payload = JSON.stringify(toPersistedDesktopConfig(config));
     if (!isTauriRuntime()) {
-      window.localStorage.setItem(CONFIG_KEY_V2, payload);
+      window.localStorage.setItem(CONFIG_KEY_V3, payload);
       return;
     }
     await invoke('save_app_config', { payload });
@@ -76,8 +111,24 @@ export const desktopBridge = {
   },
 
   async sendCommand(command: EngineCommandV1): Promise<void> {
-    if (!isTauriRuntime()) return;
-    await invoke('send_engine_command', { payload: JSON.stringify(toWireEngineCommand(command)) });
+    await enqueueEngineCommandOperation(() => sendEngineCommandNow(command));
+  },
+
+  async sendCommandWithGeneration(command: EngineCommandV1): Promise<number> {
+    return enqueueEngineCommandOperation(() => sendEngineCommandNow(command));
+  },
+
+  async runCommandTransaction<T>(
+    operation: (send: (command: EngineCommandV1) => Promise<void>) => Promise<T>,
+  ): Promise<T> {
+    return enqueueEngineCommandOperation(() => operation(async (command) => {
+      await sendEngineCommandNow(command);
+    }));
+  },
+
+  subscribeEngineCommandWarnings(listener: EngineCommandWarningListener): () => void {
+    engineCommandWarningListeners.add(listener);
+    return () => { engineCommandWarningListeners.delete(listener); };
   },
 
   pushHeadPose(sample: HeadPoseSampleV1): void {

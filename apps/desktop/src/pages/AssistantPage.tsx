@@ -138,10 +138,14 @@ export function AssistantPage() {
       }
       // La route ouvre WASAPI avec le mode de la scène moteur courante.
       // Synchronisez donc le mode/tampon avant toute (ré)ouverture.
-      await desktopBridge.sendCommand({ version: 1, type: 'set-scene', scene: latestScene });
-      await desktopBridge.sendCommand(audioRouteCommand(latestScene));
-      await desktopBridge.sendCommand({ version: 1, type: 'start' });
-      patchPreferences({ onboardingComplete: true, onboardingStep: 3 });
+      await desktopBridge.runCommandTransaction(async (sendCommand) => {
+        await sendCommand({ version: 1, type: 'set-scene', scene: latestScene });
+        await sendCommand(audioRouteCommand(latestScene));
+        await sendCommand({ version: 1, type: 'start' });
+        // Publish the desired state before releasing the command transaction:
+        // a queued engine replay must observe this route as canonical.
+        patchPreferences({ onboardingComplete: true, onboardingStep: 3 });
+      });
       setActiveView('scene');
       notify({
         tone: 'success',
@@ -173,9 +177,14 @@ export function AssistantPage() {
     routeApplyInFlight.current = true;
     setRouteApplying(true);
     try {
-      await desktopBridge.sendCommand({ version: 1, type: 'set-scene', scene: nextScene });
-      await desktopBridge.sendCommand(audioRouteCommand(nextScene));
-      patchScene(patch);
+      await desktopBridge.runCommandTransaction(async (sendCommand) => {
+        await sendCommand({ version: 1, type: 'set-scene', scene: nextScene });
+        await sendCommand(audioRouteCommand(nextScene));
+        // Commit the UI route while the global engine transaction is still
+        // held so no replay can snapshot the previous route between ACK and
+        // store publication.
+        patchScene(patch);
+      });
     } catch (error) {
       notify({ tone: 'error', title: 'Routage audio non appliqué', detail: error instanceof Error ? error.message : String(error) });
     } finally {

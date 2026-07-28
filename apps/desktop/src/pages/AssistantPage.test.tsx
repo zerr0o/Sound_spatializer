@@ -86,6 +86,9 @@ const setAssistantState = (
 describe('assistant de routage audio', () => {
   beforeEach(() => {
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: {} });
+    vi.spyOn(desktopBridge, 'runCommandTransaction')
+      .mockImplementation((operation) => operation((command) =>
+        desktopBridge.sendCommand(command)));
   });
 
   afterEach(() => {
