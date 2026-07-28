@@ -10,6 +10,29 @@ un pilote WaveRT dérivé de SysVAD. Le projet vise une qualification
 mouvement-vers-son p95 ≤ 20 ms, mais cette valeur ne peut être revendiquée qu'après
 mesure sur le banc physique décrit dans [la procédure de validation](docs/VALIDATION.md).
 
+## Aperçu
+
+### Routage audio guidé
+
+L’assistant sépare explicitement l’endpoint virtuel capturé du casque physique
+utilisé pour le rendu binaural.
+
+![Assistant de routage audio de Sound Spatializer](docs/screenshots/setup-audio-routing.png)
+
+### Spatialisation par fenêtres et écrans
+
+Chaque application conserve sa paire stéréo L/R, projetée sur la position de sa
+fenêtre et l’agencement physique des écrans.
+
+![Scène de spatialisation par fenêtres et écrans](docs/screenshots/scene-window-aware.png)
+
+### Profils HRTF
+
+Six mesures SADIE II sont disponibles hors ligne, avec comparaison A/B et
+import d’une mesure personnelle au format SOFA/AES69.
+
+![Bibliothèque de profils HRTF SADIE II](docs/screenshots/hrtf-profiles.png)
+
 ## Organisation
 
 - `apps/desktop` — Tauri 2, React, TypeScript, Three.js et suivi MediaPipe hors UI.
