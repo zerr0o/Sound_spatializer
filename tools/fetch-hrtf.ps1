@@ -8,7 +8,11 @@ param(
         'sadie-h19',
         'sadie-h20'
     ),
-    [string]$Destination
+    [string]$Destination,
+    [ValidateRange(1, 10)]
+    [int]$DownloadAttempts = 4,
+    [ValidateRange(0, 300)]
+    [int]$InitialRetryDelaySeconds = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,6 +55,49 @@ function Test-SofaFile {
     return $sha256 -eq $Profile.sofaSha256.ToLowerInvariant()
 }
 
+function Receive-VerifiedArchive {
+    param(
+        [Parameter(Mandatory)]$Profile,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $retryDelaySeconds = $InitialRetryDelaySeconds
+    for ($attempt = 1; $attempt -le $DownloadAttempts; $attempt++) {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+
+        try {
+            Write-Host "Downloading $($Profile.id) (attempt $attempt/$DownloadAttempts)..."
+            Invoke-WebRequest -Uri $Profile.source -OutFile $Path -TimeoutSec 180
+
+            $archive = Get-Item -LiteralPath $Path
+            if ($archive.Length -ne [long]$Profile.archiveBytes) {
+                throw "Size mismatch for $($Profile.archive): expected $($Profile.archiveBytes), got $($archive.Length)"
+            }
+
+            $actualMd5 = (Get-FileHash -LiteralPath $Path -Algorithm MD5).Hash.ToLowerInvariant()
+            if ($actualMd5 -ne $Profile.archiveMd5.ToLowerInvariant()) {
+                throw "Checksum mismatch for $($Profile.archive): expected $($Profile.archiveMd5), got $actualMd5"
+            }
+            return
+        }
+        catch {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+            if ($attempt -ge $DownloadAttempts) {
+                throw
+            }
+
+            Write-Warning (
+                "Download attempt $attempt/$DownloadAttempts for $($Profile.id) failed: " +
+                "$($_.Exception.Message) Retrying in $retryDelaySeconds second(s)."
+            )
+            if ($retryDelaySeconds -gt 0) {
+                Start-Sleep -Seconds $retryDelaySeconds
+            }
+            $retryDelaySeconds = [Math]::Min(30, [Math]::Max(1, $retryDelaySeconds * 2))
+        }
+    }
+}
+
 foreach ($profile in $selected) {
     $outputPath = Join-Path $resolvedDestination $profile.output
     if (Test-SofaFile -Profile $profile -Path $outputPath) {
@@ -67,13 +114,7 @@ foreach ($profile in $selected) {
     New-Item -ItemType Directory -Path $tempRoot, $extractRoot | Out-Null
 
     try {
-        Write-Host "Downloading $($profile.id)..."
-        Invoke-WebRequest -Uri $profile.source -OutFile $archivePath
-
-        $actualMd5 = (Get-FileHash -LiteralPath $archivePath -Algorithm MD5).Hash.ToLowerInvariant()
-        if ($actualMd5 -ne $profile.archiveMd5.ToLowerInvariant()) {
-            throw "Checksum mismatch for $($profile.archive): expected $($profile.archiveMd5), got $actualMd5"
-        }
+        Receive-VerifiedArchive -Profile $profile -Path $archivePath
 
         Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot
         $memberPath = Join-Path $extractRoot ($profile.member -replace '/', '\')
