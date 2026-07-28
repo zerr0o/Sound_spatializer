@@ -454,40 +454,110 @@ struct StereoPlacement {
     Vec3f right{};
 };
 
-[[nodiscard]] StereoPlacement calculate_placement(const DisplayInfo& display, const WindowMatch& window,
-                                                   float stereo_spread, bool follow_window) noexcept {
+[[nodiscard]] const DisplayInfo* display_for_point(
+    const std::vector<DisplayInfo>& displays, float x, float y,
+    const DisplayInfo& fallback) noexcept {
+    for (const auto& display : displays) {
+        if (x >= static_cast<float>(display.bounds.left) &&
+            x < static_cast<float>(display.bounds.right) &&
+            y >= static_cast<float>(display.bounds.top) &&
+            y < static_cast<float>(display.bounds.bottom)) {
+            return &display;
+        }
+    }
+
+    const DisplayInfo* nearest = &fallback;
+    float nearest_distance = std::numeric_limits<float>::max();
+    for (const auto& display : displays) {
+        const float closest_x = std::clamp(
+            x, static_cast<float>(display.bounds.left),
+            static_cast<float>(display.bounds.right));
+        const float closest_y = std::clamp(
+            y, static_cast<float>(display.bounds.top),
+            static_cast<float>(display.bounds.bottom));
+        const float delta_x = x - closest_x;
+        const float delta_y = y - closest_y;
+        const float distance =
+            delta_x * delta_x + delta_y * delta_y;
+        if (distance < nearest_distance) {
+            nearest = &display;
+            nearest_distance = distance;
+        }
+    }
+    return nearest;
+}
+
+[[nodiscard]] Vec3f map_pixel_to_world(const DisplayInfo& display, float x,
+                                       float y) noexcept {
     const float screen_width_px =
         static_cast<float>(std::max<LONG>(1, display.bounds.right - display.bounds.left));
     const float screen_height_px =
         static_cast<float>(std::max<LONG>(1, display.bounds.bottom - display.bounds.top));
-    float center_u = 0.5F;
-    float center_v = 0.5F;
-    float source_width_u = 1.0F;
-    if (follow_window && window.handle != nullptr) {
-        center_u = (0.5F * static_cast<float>(window.bounds.left + window.bounds.right) -
-                    static_cast<float>(display.bounds.left)) /
-                   screen_width_px;
-        center_v = (0.5F * static_cast<float>(window.bounds.top + window.bounds.bottom) -
-                    static_cast<float>(display.bounds.top)) /
-                   screen_height_px;
-        source_width_u = static_cast<float>(std::max<LONG>(1, window.bounds.right - window.bounds.left)) /
-                         screen_width_px;
-    }
-    center_u = std::clamp(center_u, 0.0F, 1.0F);
-    center_v = std::clamp(center_v, 0.0F, 1.0F);
-    source_width_u = std::clamp(source_width_u, 0.0F, 1.0F);
-    stereo_spread = std::clamp(stereo_spread, 0.0F, 1.0F);
-    const float offset_u = 0.5F * source_width_u * stereo_spread;
-    const float left_u = std::clamp(center_u - offset_u, 0.0F, 1.0F);
-    const float right_u = std::clamp(center_u + offset_u, 0.0F, 1.0F);
-
+    const float u = std::clamp(
+        (x - static_cast<float>(display.bounds.left)) / screen_width_px,
+        0.0F, 1.0F);
+    const float v = std::clamp(
+        (y - static_cast<float>(display.bounds.top)) / screen_height_px,
+        0.0F, 1.0F);
     const Vec3f screen_right = rotate(display.orientation, {1.0F, 0.0F, 0.0F});
     const Vec3f screen_up = rotate(display.orientation, {0.0F, 1.0F, 0.0F});
-    const auto map_to_world = [&](float u) {
-        return display.center_m + screen_right * ((u - 0.5F) * display.width_m) +
-               screen_up * ((0.5F - center_v) * display.height_m);
-    };
-    return {map_to_world(left_u), map_to_world(right_u)};
+    return display.center_m +
+           screen_right * ((u - 0.5F) * display.width_m) +
+           screen_up * ((0.5F - v) * display.height_m);
+}
+
+[[nodiscard]] StereoPlacement calculate_placement(
+    const std::vector<DisplayInfo>& displays, const DisplayInfo& display,
+    const WindowMatch& window, float stereo_spread, bool follow_window,
+    WindowAudioPlacementMode placement_mode) noexcept {
+    const float effective_spread =
+        placement_mode == WindowAudioPlacementMode::window_edges
+            ? 1.0F
+            : std::clamp(stereo_spread, 0.0F, 1.0F);
+
+    if (!follow_window || window.handle == nullptr) {
+        const float center_x =
+            0.5F * static_cast<float>(display.bounds.left +
+                                      display.bounds.right);
+        const float center_y =
+            0.5F * static_cast<float>(display.bounds.top +
+                                      display.bounds.bottom);
+        const float half_width =
+            0.5F * static_cast<float>(display.bounds.right -
+                                      display.bounds.left);
+        return {
+            map_pixel_to_world(display,
+                               center_x - half_width * effective_spread,
+                               center_y),
+            map_pixel_to_world(display,
+                               center_x + half_width * effective_spread,
+                               center_y)};
+    }
+
+    const float left_bound = static_cast<float>(window.bounds.left);
+    const float right_bound = static_cast<float>(
+        std::max<LONG>(window.bounds.left + 1, window.bounds.right));
+    const float center_x = 0.5F * (left_bound + right_bound);
+    const float center_y =
+        0.5F * static_cast<float>(window.bounds.top +
+                                  window.bounds.bottom);
+    const float half_width = 0.5F * (right_bound - left_bound);
+    const float left_x = center_x - half_width * effective_spread;
+    float right_x = center_x + half_width * effective_spread;
+    if (right_x >= right_bound) {
+        // RECT.right is exclusive. Keep an emitter on the monitor actually
+        // occupied by the rightmost window pixel when the border lands exactly
+        // on an adjacent display boundary.
+        right_x = std::nextafter(right_bound, left_bound);
+    }
+
+    const DisplayInfo* left_display =
+        display_for_point(displays, left_x, center_y, display);
+    const DisplayInfo* right_display =
+        display_for_point(displays, right_x, center_y, display);
+    return {
+        map_pixel_to_world(*left_display, left_x, center_y),
+        map_pixel_to_world(*right_display, right_x, center_y)};
 }
 
 struct SessionCandidate {
@@ -502,6 +572,7 @@ struct SessionEnumeration {
     std::vector<SessionCandidate> candidates;
     bool complete{true};
     std::size_t uncapturable_active_sessions{};
+    std::string coverage_detail;
 };
 
 [[nodiscard]] constexpr bool is_discoverable_session_state(AudioSessionState state) noexcept {
@@ -570,11 +641,17 @@ static_assert(!is_discoverable_session_state(AudioSessionStateExpired));
             // application that has not been armed. Conservatively retain the
             // endpoint mix until a complete pass succeeds.
             enumeration.complete = false;
+            if (enumeration.coverage_detail.empty())
+                enumeration.coverage_detail =
+                    "session-enumeration-entry-unavailable";
             continue;
         }
         AudioSessionState state = AudioSessionStateInactive;
         if (FAILED(control->GetState(&state))) {
             enumeration.complete = false;
+            if (enumeration.coverage_detail.empty())
+                enumeration.coverage_detail =
+                    "session-state-unavailable";
             continue;
         }
         if (!is_discoverable_session_state(state)) continue;
@@ -585,6 +662,9 @@ static_assert(!is_discoverable_session_state(AudioSessionStateExpired));
             enumeration.complete = false;
             if (session_active)
                 ++enumeration.uncapturable_active_sessions;
+            if (session_active && enumeration.coverage_detail.empty())
+                enumeration.coverage_detail =
+                    "active-session-control2-unavailable";
             continue;
         }
         const HRESULT system_session = control2->IsSystemSoundsSession();
@@ -592,11 +672,17 @@ static_assert(!is_discoverable_session_state(AudioSessionStateExpired));
             enumeration.complete = false;
             if (session_active)
                 ++enumeration.uncapturable_active_sessions;
+            if (session_active && enumeration.coverage_detail.empty())
+                enumeration.coverage_detail =
+                    "active-session-type-unavailable";
             continue;
         }
         if (system_session == S_OK) {
-            if (session_active)
-                ++enumeration.uncapturable_active_sessions;
+            // System sounds have no application window and process-loopback
+            // cannot target their PID 0 session. They are outside the
+            // per-window source set; counting the session as uncovered would
+            // keep this mode in endpoint fallback permanently on machines
+            // where Windows leaves that session active.
             continue;
         }
         DWORD process_id = 0;
@@ -604,6 +690,9 @@ static_assert(!is_discoverable_session_state(AudioSessionStateExpired));
             enumeration.complete = false;
             if (session_active)
                 ++enumeration.uncapturable_active_sessions;
+            if (session_active && enumeration.coverage_detail.empty())
+                enumeration.coverage_detail =
+                    "active-session-process-unavailable";
             continue;
         }
 
@@ -894,6 +983,11 @@ struct CaptureSlot {
     // overwriting a concurrent capture-thread revocation.
     std::atomic<std::uint64_t> inactive_pcm_epoch{};
     std::atomic<std::uint64_t> validated_inactive_pcm_epoch{};
+    // Once discovery has confirmed that the source-endpoint session is still
+    // inactive, process-loopback PCM belongs to another endpoint. Keep
+    // discarding it without repeatedly poisoning otherwise complete coverage.
+    // A source-session transition clears this latch.
+    std::atomic<bool> inactive_pcm_confirmed_external{};
     std::atomic<std::uint32_t> realtime_readers{};
     std::atomic<WindowAudioCaptureState> capture_state{WindowAudioCaptureState::inactive};
     std::atomic<std::uint32_t> sample_rate{};
@@ -902,8 +996,6 @@ struct CaptureSlot {
     std::jthread capture_thread;
     SlotMetadata metadata;
     std::uint32_t missed_discovery_passes{};
-    std::uint64_t discovery_inactive_pcm_epoch{};
-    std::uint64_t inactive_pcm_quiet_since_ms{};
 
     CaptureSlot() {
         // A single process-loopback packet is commonly 480 frames. Waiting for
@@ -1116,12 +1208,21 @@ public:
         result.candidates_seen = candidates_seen_.load(std::memory_order_relaxed);
         result.capture_start_failures = capture_start_failures_.load(std::memory_order_relaxed);
         result.unsupported_formats = unsupported_formats_.load(std::memory_order_relaxed);
+        result.uncovered_active_sessions =
+            uncovered_active_sessions_.load(std::memory_order_relaxed);
         result.fifo_overruns = fifo_overruns_.load(std::memory_order_relaxed);
         result.fifo_underruns = fifo_underruns_.load(std::memory_order_relaxed);
         result.captured_frames = captured_frames_.load(std::memory_order_relaxed);
         result.duplicated_mono_frames = duplicated_mono_frames_.load(std::memory_order_relaxed);
         result.mmcss_registration_failures =
             mmcss_registration_failures_.load(std::memory_order_relaxed);
+        const WindowAudioRealtimeSnapshot realtime = realtime_snapshot();
+        result.required_active_captures =
+            realtime.required_active_captures;
+        result.ready_active_captures = realtime.ready_active_captures;
+        result.coverage_complete = realtime.coverage_complete;
+        result.endpoint_fallback_requested =
+            realtime.endpoint_fallback_requested;
         for (const auto& slot : slots_) {
             if (window_audio_slot_is_renderable(
                     slot.active.load(std::memory_order_acquire),
@@ -1133,6 +1234,7 @@ public:
         }
         {
             std::lock_guard lock(error_mutex_);
+            copy_text(result.coverage_detail, coverage_detail_);
             copy_text(result.last_error, last_error_);
         }
         return result;
@@ -1207,6 +1309,11 @@ private:
         last_error_.clear();
     }
 
+    void set_coverage_detail(std::string detail) {
+        std::lock_guard lock(error_mutex_);
+        coverage_detail_ = std::move(detail);
+    }
+
     void publish_coverage_state(
         bool structurally_complete,
         std::size_t required_active_captures) noexcept {
@@ -1248,8 +1355,8 @@ private:
             slot.inactive_pcm_epoch.load(std::memory_order_acquire);
         slot.validated_inactive_pcm_epoch.store(
             inactive_pcm_epoch, std::memory_order_release);
-        slot.discovery_inactive_pcm_epoch = inactive_pcm_epoch;
-        slot.inactive_pcm_quiet_since_ms = 0;
+        slot.inactive_pcm_confirmed_external.store(
+            false, std::memory_order_release);
         slot.process_id.store(0, std::memory_order_release);
         slot.sample_rate.store(0, std::memory_order_relaxed);
         slot.channel_count.store(0, std::memory_order_relaxed);
@@ -1305,35 +1412,35 @@ private:
             });
     }
 
-    void reconcile_inactive_pcm_fallback(CaptureSlot& slot,
-                                         std::uint64_t now_ms) noexcept {
+    void reconcile_inactive_pcm_fallback(CaptureSlot& slot) noexcept {
         const std::uint64_t observed =
             slot.inactive_pcm_epoch.load(std::memory_order_acquire);
+        const std::uint64_t validated =
+            slot.validated_inactive_pcm_epoch.load(
+                std::memory_order_acquire);
+        if (observed == validated) return;
+
         if (slot.session_active.load(std::memory_order_acquire)) {
             // Coverage was invalidated before reconciliation. Fresh PCM was
             // also required by update_slot_metadata(), so acknowledging this
             // epoch cannot authorize the pre-discovery packet.
             slot.validated_inactive_pcm_epoch.store(
                 observed, std::memory_order_release);
-            slot.discovery_inactive_pcm_epoch = observed;
-            slot.inactive_pcm_quiet_since_ms = now_ms;
+            slot.inactive_pcm_confirmed_external.store(
+                false, std::memory_order_release);
             return;
         }
-        if (observed != slot.discovery_inactive_pcm_epoch) {
-            slot.discovery_inactive_pcm_epoch = observed;
-            slot.inactive_pcm_quiet_since_ms = now_ms;
-            return;
-        }
-        if (window_audio_inactive_pcm_requires_endpoint_fallback(
-                observed,
-                slot.validated_inactive_pcm_epoch.load(
-                    std::memory_order_acquire)) &&
-            window_audio_inactive_pcm_epoch_is_stable(
-                observed, slot.discovery_inactive_pcm_epoch,
-                slot.inactive_pcm_quiet_since_ms, now_ms)) {
-            slot.validated_inactive_pcm_epoch.store(
-                observed, std::memory_order_release);
-        }
+
+        // One complete discovery pass has now confirmed that the application
+        // is not rendering into the selected source endpoint. Its
+        // process-loopback stream may legitimately contain audio from another
+        // endpoint; discard that audio until the endpoint session changes,
+        // rather than forcing the whole renderer into a permanent stereo
+        // fallback.
+        slot.validated_inactive_pcm_epoch.store(
+            observed, std::memory_order_release);
+        slot.inactive_pcm_confirmed_external.store(
+            true, std::memory_order_release);
     }
 
     void capture_loop(CaptureSlot& slot, std::uint32_t process_id, std::uint32_t generation,
@@ -1470,8 +1577,7 @@ private:
                                 return frame.left != 0.0F ||
                                        frame.right != 0.0F;
                             });
-                    const std::size_t pushed =
-                        slot.resampler.push(scratch.data(), block);
+                    std::size_t pushed = 0;
                     if (block_is_non_silent) {
                         const bool session_active_after =
                             slot.session_active.load(std::memory_order_acquire);
@@ -1492,23 +1598,38 @@ private:
                             // thread's earlier FIFO boundary and become audible
                             // after the veto is acknowledged.
                             slot.resampler.request_rebase();
-                            const std::uint64_t previous_epoch =
-                                slot.inactive_pcm_epoch.fetch_add(
-                                    1, std::memory_order_acq_rel);
-                            if (previous_epoch ==
-                                slot.validated_inactive_pcm_epoch.load(
+                            if (!slot.inactive_pcm_confirmed_external.load(
                                     std::memory_order_acquire)) {
-                                refresh_revision_.fetch_add(
-                                    1, std::memory_order_release);
-                                refresh_cv_.notify_one();
+                                std::uint64_t observed =
+                                    slot.inactive_pcm_epoch.load(
+                                        std::memory_order_acquire);
+                                const std::uint64_t validated =
+                                    slot.validated_inactive_pcm_epoch.load(
+                                        std::memory_order_acquire);
+                                if (observed == validated &&
+                                    slot.inactive_pcm_epoch
+                                        .compare_exchange_strong(
+                                            observed, observed + 1,
+                                            std::memory_order_acq_rel,
+                                            std::memory_order_acquire)) {
+                                    refresh_revision_.fetch_add(
+                                        1, std::memory_order_release);
+                                    refresh_cv_.notify_one();
+                                }
                             }
-                        } else if (pushed != 0) {
+                        } else {
+                            pushed =
+                                slot.resampler.push(scratch.data(), block);
+                            if (pushed != 0) {
                             // Process-loopback follows the process tree across
                             // all render endpoints. Only a block bracketed by
                             // source-session authority may prove readiness.
-                            slot.pcm_ready.store(
-                                true, std::memory_order_release);
+                                slot.pcm_ready.store(
+                                    true, std::memory_order_release);
+                            }
                         }
+                    } else {
+                        pushed = slot.resampler.push(scratch.data(), block);
                     }
                     if (pushed < block) {
                         fifo_overruns_.fetch_add(block - pushed, std::memory_order_relaxed);
@@ -1547,6 +1668,10 @@ private:
         slot.metadata.session = candidate;
         const bool was_session_active =
             slot.session_active.load(std::memory_order_acquire);
+        if (candidate.session_active != was_session_active) {
+            slot.inactive_pcm_confirmed_external.store(
+                false, std::memory_order_release);
+        }
         if (candidate.session_active && !was_session_active) {
             // Discard the low-latency tail that may have been captured while
             // the process was rendering on another endpoint. A fresh
@@ -1578,8 +1703,8 @@ private:
         } else {
             slot.metadata.display_id = display->id;
             slot.metadata.placement = calculate_placement(
-                *display, slot.metadata.window, spread,
-                config.follow_window_position);
+                displays, *display, slot.metadata.window, spread,
+                config.follow_window_position, config.placement_mode);
         }
         slot.metadata.gain_db = gain_db;
         slot.placement.store(slot.metadata.placement, std::pow(10.0F, gain_db / 20.0F));
@@ -1766,17 +1891,40 @@ private:
             if (!discovery_error.empty()) set_error(std::move(discovery_error));
             std::size_t uncovered_active_sessions =
                 enumeration.uncapturable_active_sessions;
+            std::string coverage_detail =
+                std::move(enumeration.coverage_detail);
             for (const SessionCandidate& candidate : candidates) {
                 if (!candidate.session_active) continue;
                 const WindowAudioSourceRule* rule =
                     rule_for(config, candidate.application_id);
-                if (capture_tree_intersects_excluded_process(
-                        process_tree, config.excluded_process_id,
-                        candidate.process_id) ||
-                    (rule != nullptr && !rule->enabled)) {
+                // The endpoint loopback client itself is exposed by Windows as
+                // an active session owned by the engine. It is capture
+                // bookkeeping, not programme audio. An ancestor/descendant
+                // process tree remains a real feedback risk and is still
+                // treated as uncovered below.
+                const bool loop_risk =
+                    window_audio_excluded_session_blocks_coverage(
+                        candidate.process_id, config.excluded_process_id,
+                        capture_tree_intersects_excluded_process(
+                            process_tree, config.excluded_process_id,
+                            candidate.process_id));
+                const bool disabled =
+                    rule != nullptr && !rule->enabled;
+                if (loop_risk || disabled) {
                     ++uncovered_active_sessions;
+                    if (coverage_detail.empty()) {
+                        coverage_detail =
+                            loop_risk ? "feedback-loop-risk:"
+                                      : "source-rule-disabled:";
+                        coverage_detail += candidate.application_name;
+                        coverage_detail += ":pid=" +
+                            std::to_string(candidate.process_id);
+                    }
                 }
             }
+            uncovered_active_sessions_.store(
+                uncovered_active_sessions, std::memory_order_relaxed);
+            set_coverage_detail(std::move(coverage_detail));
             // Filter hazardous roots before parent/child deduplication. If a
             // shell owns one session while another legitimate child owns a
             // second, removing the shell only after deduplication would also
@@ -1829,12 +1977,9 @@ private:
                     false, required_active_roots.size());
             }
             reconcile_sessions(candidates, displays, process_tree, config);
-            const std::uint64_t fallback_reconcile_now_ms =
-                GetTickCount64();
             for (auto& slot : slots_) {
                 if (slot.active.load(std::memory_order_acquire)) {
-                    reconcile_inactive_pcm_fallback(
-                        slot, fallback_reconcile_now_ms);
+                    reconcile_inactive_pcm_fallback(slot);
                 }
             }
 
@@ -1852,13 +1997,38 @@ private:
                                            std::memory_order_acquire) ==
                                            process_id &&
                                        slot.session_active.load(
-                                           std::memory_order_acquire);
+                                           std::memory_order_acquire) &&
+                                       slot.capture_state.load(
+                                           std::memory_order_acquire) ==
+                                           WindowAudioCaptureState::capturing;
                             });
                     });
+            const std::size_t audible_required_roots =
+                static_cast<std::size_t>(std::count_if(
+                    required_active_roots.begin(),
+                    required_active_roots.end(),
+                    [&](std::uint32_t process_id) {
+                        return std::any_of(
+                            slots_.begin(), slots_.end(),
+                            [&](const CaptureSlot& slot) {
+                                return slot.process_id.load(
+                                           std::memory_order_acquire) ==
+                                           process_id &&
+                                       window_audio_slot_is_renderable(
+                                           slot.active.load(
+                                               std::memory_order_acquire),
+                                           slot.capture_state.load(
+                                               std::memory_order_acquire),
+                                           slot.pcm_ready.load(
+                                               std::memory_order_acquire),
+                                           slot.session_active.load(
+                                               std::memory_order_acquire));
+                            });
+                    }));
             publish_coverage_state(
                 preliminary_coverage &&
                     every_required_root_assigned,
-                required_active_roots.size());
+                audible_required_roots);
             published_active_roots_ = std::move(required_active_roots);
             if (!stop_requested_.load(std::memory_order_acquire)) {
                 validated_coverage_policy_revision_.store(
@@ -1911,12 +2081,14 @@ private:
     std::vector<std::uint32_t> published_active_roots_{};
     mutable std::mutex error_mutex_;
     std::string last_error_;
+    std::string coverage_detail_;
 
     std::atomic<std::uint64_t> discovery_passes_{};
     std::atomic<std::uint64_t> sessions_seen_{};
     std::atomic<std::uint64_t> candidates_seen_{};
     std::atomic<std::uint64_t> capture_start_failures_{};
     std::atomic<std::uint64_t> unsupported_formats_{};
+    std::atomic<std::size_t> uncovered_active_sessions_{};
     std::atomic<std::uint64_t> fifo_overruns_{};
     std::atomic<std::uint64_t> fifo_underruns_{};
     std::atomic<std::uint64_t> captured_frames_{};

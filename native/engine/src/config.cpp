@@ -581,7 +581,8 @@ void append_bands(std::ostringstream& output, const MaterialBands& value) {
     const auto& root_object = object(root, "windowSpatialization");
     reject_unknown_fields(root_object,
                           {"schemaVersion", "enabled", "maxSources", "stereoSpread",
-                           "followWindowPosition", "displayCalibrations", "sourceRules"},
+                           "emitterPlacementMode", "followWindowPosition",
+                           "displayCalibrations", "sourceRules"},
                           "windowSpatialization");
     if (unsigned_integer(field(root_object, "schemaVersion"), "schemaVersion") != 1U)
         throw std::runtime_error("unsupported window spatialization schema version");
@@ -591,6 +592,20 @@ void append_bands(std::ostringstream& output, const MaterialBands& value) {
     config.max_applications = unsigned_integer(field(root_object, "maxSources"), "maxSources");
     config.stereo_spread =
         static_cast<float>(number(field(root_object, "stereoSpread"), "stereoSpread"));
+    if (const JsonValue* placement_mode =
+            optional_field(root_object, "emitterPlacementMode")) {
+        const std::string mode =
+            string(*placement_mode, "emitterPlacementMode");
+        if (mode == "proportional")
+            config.placement_mode =
+                WindowAudioPlacementMode::proportional;
+        else if (mode == "window-edges")
+            config.placement_mode =
+                WindowAudioPlacementMode::window_edges;
+        else
+            throw std::runtime_error(
+                "emitterPlacementMode must be proportional or window-edges");
+    }
     config.follow_window_position =
         boolean(field(root_object, "followWindowPosition"), "followWindowPosition");
 
@@ -895,6 +910,12 @@ std::string window_audio_config_to_json(const WindowAudioConfig& config) {
            << (config.enabled ? "true" : "false")
            << ",\"maxSources\":" << config.max_applications
            << ",\"stereoSpread\":" << config.stereo_spread
+           << ",\"emitterPlacementMode\":\""
+           << (config.placement_mode ==
+                       WindowAudioPlacementMode::window_edges
+                   ? "window-edges"
+                   : "proportional")
+           << '"'
            << ",\"followWindowPosition\":"
            << (config.follow_window_position ? "true" : "false")
            << ",\"displayCalibrations\":[";
@@ -1020,9 +1041,24 @@ std::string window_audio_status_to_json(
     output << "],\"diagnostics\":{\"discoveryPasses\":"
            << diagnostics.discovery_passes << ",\"sessionsSeen\":"
            << diagnostics.sessions_seen << ",\"captureStartFailures\":"
-           << diagnostics.capture_start_failures << ",\"fifoOverruns\":"
+           << diagnostics.capture_start_failures
+           << ",\"uncoveredActiveSessions\":"
+           << diagnostics.uncovered_active_sessions
+           << ",\"fifoOverruns\":"
            << diagnostics.fifo_overruns << ",\"fifoUnderruns\":"
-           << diagnostics.fifo_underruns << ",\"lastError\":";
+           << diagnostics.fifo_underruns
+           << ",\"requiredActiveCaptures\":"
+           << diagnostics.required_active_captures
+           << ",\"readyActiveCaptures\":"
+           << diagnostics.ready_active_captures
+           << ",\"coverageComplete\":"
+           << (diagnostics.coverage_complete ? "true" : "false")
+           << ",\"endpointFallbackRequested\":"
+           << (diagnostics.endpoint_fallback_requested ? "true" : "false")
+           << ",\"coverageDetail\":";
+    append_escaped(output, fixed_string(diagnostics.coverage_detail));
+    output
+           << ",\"lastError\":";
     append_escaped(output, fixed_string(diagnostics.last_error));
     output << "}}";
     return output.str();

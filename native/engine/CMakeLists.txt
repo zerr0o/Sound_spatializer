@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(SoundSpatializerEngine VERSION 0.1.0 LANGUAGES CXX)
+project(SoundSpatializerEngine VERSION 0.2.0 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

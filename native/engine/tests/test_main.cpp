@@ -1671,14 +1671,12 @@ void test_window_spatialization_contract_status_and_persistence() {
     CHECK(!WindowAudioRealtimeSnapshot{}.coverage_complete);
     CHECK(!window_audio_inactive_pcm_requires_endpoint_fallback(7, 7));
     CHECK(window_audio_inactive_pcm_requires_endpoint_fallback(8, 7));
-    CHECK(!window_audio_inactive_pcm_epoch_is_stable(8, 7, 1'000,
-                                                     1'200));
-    CHECK(!window_audio_inactive_pcm_epoch_is_stable(8, 8, 1'000,
-                                                     1'149));
-    CHECK(window_audio_inactive_pcm_epoch_is_stable(8, 8, 1'000,
-                                                    1'150));
-    CHECK(!window_audio_inactive_pcm_epoch_is_stable(8, 8, 1'150,
-                                                     1'149));
+    CHECK(!window_audio_excluded_session_blocks_coverage(
+        42, 42, true));
+    CHECK(window_audio_excluded_session_blocks_coverage(
+        41, 42, true));
+    CHECK(!window_audio_excluded_session_blocks_coverage(
+        41, 42, false));
     CHECK(!window_audio_slot_is_renderable(
         true, WindowAudioCaptureState::capturing, false, true));
     CHECK(!window_audio_slot_is_renderable(
@@ -1691,11 +1689,14 @@ void test_window_spatialization_contract_status_and_persistence() {
     WindowAudioConfig config{};
     WindowAudioSourceRule default_rule{};
     CHECK_NEAR(config.stereo_spread, 0.72F, 1.0e-7F);
+    CHECK(config.placement_mode ==
+          WindowAudioPlacementMode::proportional);
     CHECK(config.refresh_interval_ms == 10U);
     CHECK_NEAR(default_rule.stereo_spread, 0.72F, 1.0e-7F);
     config.enabled = true;
     config.max_applications = 3;
     config.stereo_spread = 0.75F;
+    config.placement_mode = WindowAudioPlacementMode::window_edges;
     config.follow_window_position = false;
     config.display_calibration_count = 1;
     config.display_calibrations[0].display_id = R"(\\?\DISPLAY#RIGHT)";
@@ -1722,6 +1723,8 @@ void test_window_spatialization_contract_status_and_persistence() {
     const std::string json = window_audio_config_to_json(config);
     CHECK(json.find("\"schemaVersion\":1") != std::string::npos);
     CHECK(json.find("\"maxSources\":3") != std::string::npos);
+    CHECK(json.find("\"emitterPlacementMode\":\"window-edges\"") !=
+          std::string::npos);
     CHECK(json.find("\"followWindowPosition\":false") != std::string::npos);
 
     const auto parsed = window_audio_config_from_json(json);
@@ -1730,6 +1733,8 @@ void test_window_spatialization_contract_status_and_persistence() {
         CHECK(parsed.value->enabled);
         CHECK(parsed.value->max_applications == 3U);
         CHECK_NEAR(parsed.value->stereo_spread, 0.75F, 1.0e-6F);
+        CHECK(parsed.value->placement_mode ==
+              WindowAudioPlacementMode::window_edges);
         CHECK(parsed.value->display_calibration_count == 1U);
         CHECK(parsed.value->display_calibrations[0].display_id ==
               config.display_calibrations[0].display_id);
@@ -1740,6 +1745,15 @@ void test_window_spatialization_contract_status_and_persistence() {
               config.source_rules[0].application_id);
         CHECK_NEAR(parsed.value->source_rules[0].gain_db, -2.5F, 1.0e-6F);
     }
+    const auto legacy_placement = window_audio_config_from_json(
+        R"({"schemaVersion":1,"enabled":true,"maxSources":8,"stereoSpread":0.72,"followWindowPosition":true,"displayCalibrations":[],"sourceRules":[]})");
+    CHECK(legacy_placement);
+    if (legacy_placement) {
+        CHECK(legacy_placement.value->placement_mode ==
+              WindowAudioPlacementMode::proportional);
+    }
+    CHECK(!window_audio_config_from_json(
+        R"({"schemaVersion":1,"enabled":true,"maxSources":8,"stereoSpread":0.72,"emitterPlacementMode":"invalid","followWindowPosition":true,"displayCalibrations":[],"sourceRules":[]})"));
 
     const std::string command_json =
         R"({"schemaVersion":1,"type":"set-window-spatialization","config":)" +
@@ -1813,11 +1827,25 @@ void test_window_spatialization_contract_status_and_persistence() {
     diagnostics.running = true;
     diagnostics.discovery_passes = 9;
     diagnostics.active_slots = 1;
+    diagnostics.uncovered_active_sessions = 0;
+    diagnostics.required_active_captures = 1;
+    diagnostics.ready_active_captures = 1;
+    diagnostics.coverage_complete = true;
+    std::snprintf(diagnostics.coverage_detail.data(),
+                  diagnostics.coverage_detail.size(), "%s", "");
     const std::string window_status =
         window_audio_status_to_json(snapshot, diagnostics);
     CHECK(window_status.find("\"sourceCount\":1") != std::string::npos);
     CHECK(window_status.find("\"display-right\"") != std::string::npos);
     CHECK(window_status.find("\"captureState\":\"capturing\"") !=
+          std::string::npos);
+    CHECK(window_status.find("\"requiredActiveCaptures\":1") !=
+          std::string::npos);
+    CHECK(window_status.find("\"uncoveredActiveSessions\":0") !=
+          std::string::npos);
+    CHECK(window_status.find("\"coverageComplete\":true") !=
+          std::string::npos);
+    CHECK(window_status.find("\"coverageDetail\":\"\"") !=
           std::string::npos);
 
     EngineStatusV1 status{};

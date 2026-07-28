@@ -16,8 +16,6 @@ inline constexpr std::size_t kMaximumWindowAudioDisplays = 16;
 inline constexpr std::size_t kMaximumWindowAudioSourceRules = 64;
 inline constexpr std::size_t kWindowAudioApplicationIdBytes = 1'024;
 inline constexpr std::size_t kWindowAudioDisplayIdBytes = 512;
-inline constexpr std::uint64_t
-    kWindowAudioInactivePcmFallbackQuietPeriodMs = 150;
 
 struct WindowAudioSlotHandle {
     std::uint32_t slot{};
@@ -57,6 +55,11 @@ struct WindowAudioSourceRule {
     std::string fallback_display_id;
 };
 
+enum class WindowAudioPlacementMode : std::uint32_t {
+    proportional = 0,
+    window_edges = 1,
+};
+
 struct WindowAudioConfig {
     bool enabled{};
     // Empty selects the current default multimedia render endpoint for session
@@ -68,6 +71,8 @@ struct WindowAudioConfig {
     std::uint32_t refresh_interval_ms{10};
     std::size_t max_applications{kMaximumWindowAudioApplications};
     float stereo_spread{0.72F};
+    WindowAudioPlacementMode placement_mode{
+        WindowAudioPlacementMode::proportional};
     bool follow_window_position{true};
     std::array<WindowAudioDisplayCalibration, kMaximumWindowAudioDisplays> display_calibrations{};
     std::size_t display_calibration_count{};
@@ -134,15 +139,13 @@ window_audio_inactive_pcm_requires_endpoint_fallback(
     return observed_epoch != validated_epoch;
 }
 
-[[nodiscard]] constexpr bool window_audio_inactive_pcm_epoch_is_stable(
-    std::uint64_t observed_epoch,
-    std::uint64_t discovery_epoch,
-    std::uint64_t quiet_since_ms,
-    std::uint64_t now_ms) noexcept {
-    return observed_epoch == discovery_epoch &&
-           now_ms >= quiet_since_ms &&
-           now_ms - quiet_since_ms >=
-               kWindowAudioInactivePcmFallbackQuietPeriodMs;
+[[nodiscard]] constexpr bool
+window_audio_excluded_session_blocks_coverage(
+    std::uint32_t candidate_process_id,
+    std::uint32_t excluded_process_id,
+    bool process_trees_intersect) noexcept {
+    return candidate_process_id != excluded_process_id &&
+           process_trees_intersect;
 }
 
 struct WindowAudioDisplaySnapshot {
@@ -192,12 +195,18 @@ struct WindowAudioDiagnostics {
     std::uint64_t candidates_seen{};
     std::uint64_t capture_start_failures{};
     std::uint64_t unsupported_formats{};
+    std::size_t uncovered_active_sessions{};
     std::uint64_t fifo_overruns{};
     std::uint64_t fifo_underruns{};
     std::uint64_t captured_frames{};
     std::uint64_t duplicated_mono_frames{};
     std::uint64_t mmcss_registration_failures{};
     std::size_t active_slots{};
+    std::size_t required_active_captures{};
+    std::size_t ready_active_captures{};
+    bool coverage_complete{};
+    bool endpoint_fallback_requested{};
+    std::array<char, 512> coverage_detail{};
     std::array<char, 256> last_error{};
 };
 

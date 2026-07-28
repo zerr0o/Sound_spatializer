@@ -178,6 +178,7 @@ describe('commandes moteur', () => {
     const config = {
       ...structuredClone(defaultWindowSpatialization),
       enabled: true,
+      emitterPlacementMode: 'window-edges' as const,
       displayCalibrations: [{
         displayId: 'display-right',
         center: { x: 0.8, y: 1.2, z: 0.9 },
@@ -198,6 +199,7 @@ describe('commandes moteur', () => {
       schemaVersion: 1,
       enabled: true,
       maxSources: 8,
+      emitterPlacementMode: 'window-edges',
       displayCalibrations: [{
         displayId: 'display-right',
         centerM: [0.8, 1.2, 0.9],
@@ -206,6 +208,9 @@ describe('commandes moteur', () => {
     });
     expect(isWireWindowSpatializationConfigV1(wire)).toBe(true);
     expect(fromWireWindowSpatializationConfig(wire)).toEqual(config);
+    const legacyWire = { ...wire };
+    delete legacyWire.emitterPlacementMode;
+    expect(fromWireWindowSpatializationConfig(legacyWire).emitterPlacementMode).toBe('proportional');
     expect(toWireEngineCommand({
       version: 1,
       type: 'set-window-spatialization',

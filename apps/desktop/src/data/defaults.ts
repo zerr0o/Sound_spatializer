@@ -110,6 +110,7 @@ export const defaultWindowSpatialization: WindowSpatializationConfigV1 = {
   enabled: false,
   maxSources: 8,
   stereoSpread: 0.72,
+  emitterPlacementMode: 'proportional',
   followWindowPosition: true,
   displayCalibrations: [],
   sourceRules: [],

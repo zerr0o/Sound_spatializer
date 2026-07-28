@@ -195,6 +195,17 @@ describe('éditeur d’implantation 5.1', () => {
     });
   });
 
+  it('place L/R sur les bords de fenêtre avec un mode explicite', () => {
+    enableWindowRuntime();
+    render(<ScenePage />);
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Bords de fenêtre' }));
+
+    expect(useAppStore.getState().windowSpatialization.emitterPlacementMode).toBe('window-edges');
+    expect(screen.queryByRole('slider', { name: 'Largeur stéréo par défaut' })).not.toBeInTheDocument();
+    expect(screen.getByText(/Chaque bord est projeté indépendamment/)).toBeInTheDocument();
+  });
+
   it('signale le repli global qui protège une source non séparée', () => {
     enableWindowRuntime();
     useAppStore.getState().setEngine({

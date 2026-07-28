@@ -136,6 +136,8 @@ export interface WireWindowSpatializationConfigV1 {
   enabled: boolean;
   maxSources: number;
   stereoSpread: number;
+  /** Optional for configs written before per-border placement was introduced. */
+  emitterPlacementMode?: 'proportional' | 'window-edges';
   followWindowPosition: boolean;
   displayCalibrations: WireDisplaySpatialCalibration[];
   sourceRules: WireWindowSourceRule[];
@@ -205,8 +207,14 @@ export interface WireEngineStatusV1 {
       discoveryPasses?: number;
       sessionsSeen?: number;
       captureStartFailures?: number;
+      uncoveredActiveSessions?: number;
       fifoOverruns?: number;
       fifoUnderruns?: number;
+      requiredActiveCaptures?: number;
+      readyActiveCaptures?: number;
+      coverageComplete?: boolean;
+      endpointFallbackRequested?: boolean;
+      coverageDetail?: string;
       lastError: string;
     };
   };

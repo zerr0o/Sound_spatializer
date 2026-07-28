@@ -55,6 +55,7 @@ export const toWireWindowSpatializationConfig = (
   enabled: config.enabled,
   maxSources: Math.round(clamp(config.maxSources, 1, 8)),
   stereoSpread: clamp(config.stereoSpread, 0, 1),
+  emitterPlacementMode: config.emitterPlacementMode,
   followWindowPosition: config.followWindowPosition,
   displayCalibrations: config.displayCalibrations.slice(0, 16).map((display) => ({
     displayId: display.displayId,
@@ -82,6 +83,9 @@ export const isWireWindowSpatializationConfigV1 = (
     Number.isInteger(config.maxSources) && (config.maxSources ?? 0) >= 1 && (config.maxSources ?? 0) <= 8 &&
     typeof config.stereoSpread === 'number' && Number.isFinite(config.stereoSpread) &&
     config.stereoSpread >= 0 && config.stereoSpread <= 1 &&
+    (config.emitterPlacementMode === undefined ||
+      config.emitterPlacementMode === 'proportional' ||
+      config.emitterPlacementMode === 'window-edges') &&
     typeof config.followWindowPosition === 'boolean' &&
     Array.isArray(config.displayCalibrations) && config.displayCalibrations.length <= 16 &&
     config.displayCalibrations.every((display) =>
@@ -112,6 +116,7 @@ export const fromWireWindowSpatializationConfig = (
   enabled: wire.enabled,
   maxSources: wire.maxSources,
   stereoSpread: wire.stereoSpread,
+  emitterPlacementMode: wire.emitterPlacementMode ?? 'proportional',
   followWindowPosition: wire.followWindowPosition,
   displayCalibrations: wire.displayCalibrations.map((display) => ({
     displayId: display.displayId,
@@ -618,12 +623,27 @@ export const isWireEngineStatusV1 = (value: unknown): value is WireEngineStatusV
         Array.isArray(status.windowAudio.windowSources) && status.windowAudio.windowSources.length <= 8 &&
         status.windowAudio.windowSources.every(isWireWindowAudioSourceInfo) &&
         status.windowAudio.diagnostics !== null && typeof status.windowAudio.diagnostics === 'object' &&
+        (status.windowAudio.diagnostics.uncoveredActiveSessions === undefined ||
+          (Number.isInteger(status.windowAudio.diagnostics.uncoveredActiveSessions) &&
+            status.windowAudio.diagnostics.uncoveredActiveSessions >= 0)) &&
         (status.windowAudio.diagnostics.fifoOverruns === undefined ||
           (Number.isInteger(status.windowAudio.diagnostics.fifoOverruns) &&
             status.windowAudio.diagnostics.fifoOverruns >= 0)) &&
         (status.windowAudio.diagnostics.fifoUnderruns === undefined ||
           (Number.isInteger(status.windowAudio.diagnostics.fifoUnderruns) &&
             status.windowAudio.diagnostics.fifoUnderruns >= 0)) &&
+        (status.windowAudio.diagnostics.requiredActiveCaptures === undefined ||
+          (Number.isInteger(status.windowAudio.diagnostics.requiredActiveCaptures) &&
+            status.windowAudio.diagnostics.requiredActiveCaptures >= 0)) &&
+        (status.windowAudio.diagnostics.readyActiveCaptures === undefined ||
+          (Number.isInteger(status.windowAudio.diagnostics.readyActiveCaptures) &&
+            status.windowAudio.diagnostics.readyActiveCaptures >= 0)) &&
+        (status.windowAudio.diagnostics.coverageComplete === undefined ||
+          typeof status.windowAudio.diagnostics.coverageComplete === 'boolean') &&
+        (status.windowAudio.diagnostics.endpointFallbackRequested === undefined ||
+          typeof status.windowAudio.diagnostics.endpointFallbackRequested === 'boolean') &&
+        (status.windowAudio.diagnostics.coverageDetail === undefined ||
+          typeof status.windowAudio.diagnostics.coverageDetail === 'string') &&
         typeof status.windowAudio.diagnostics.lastError === 'string')) &&
     typeof status.captureState === 'string' && streamStates.has(status.captureState) &&
     typeof status.renderState === 'string' && streamStates.has(status.renderState) &&

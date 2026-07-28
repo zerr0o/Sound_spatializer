@@ -195,6 +195,8 @@ export interface WindowSourceRule {
   fallbackDisplayId: string | null;
 }
 
+export type WindowEmitterPlacementMode = 'proportional' | 'window-edges';
+
 export interface WindowSpatializationConfigV1 {
   version: typeof WINDOW_SPATIALIZATION_CONFIG_VERSION;
   enabled: boolean;
@@ -202,6 +204,8 @@ export interface WindowSpatializationConfigV1 {
   maxSources: number;
   /** Largeur stéréo globale, de mono centré (0) à toute la largeur de la fenêtre (1). */
   stereoSpread: number;
+  /** Placement pondéré par la largeur ou exactement sur les bords gauche/droit. */
+  emitterPlacementMode: WindowEmitterPlacementMode;
   followWindowPosition: boolean;
   displayCalibrations: DisplaySpatialCalibration[];
   sourceRules: WindowSourceRule[];

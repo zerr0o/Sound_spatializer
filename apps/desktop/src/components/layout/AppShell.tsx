@@ -100,7 +100,7 @@ export function AppShell({ children }: PropsWithChildren) {
           <LifeBuoy size={16} />
           Configuration guidée
         </button>
-        <div className="version-label">EARLY ACCESS · 0.1.0</div>
+        <div className="version-label">EARLY ACCESS · 0.2.0</div>
       </aside>
 
       <main className="workspace">

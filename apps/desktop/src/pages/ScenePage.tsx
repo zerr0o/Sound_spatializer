@@ -603,6 +603,21 @@ export function ScenePage() {
                 label="Suivre les déplacements"
                 description="La paire stéréo suit le centre et la largeur de chaque fenêtre."
               />
+              <div className="control-stack">
+                <span className="control-label">Placement des émetteurs L/R</span>
+                <SegmentedControl
+                  value={windowSpatialization.emitterPlacementMode}
+                  options={[
+                    { value: 'proportional', label: 'Largeur réglable' },
+                    { value: 'window-edges', label: 'Bords de fenêtre' },
+                  ]}
+                  onChange={(emitterPlacementMode) => applyWindowSpatialization({ emitterPlacementMode })}
+                  ariaLabel="Placement des émetteurs stéréo de chaque fenêtre"
+                />
+                <small className="control-hint">
+                  Chaque bord est projeté indépendamment sur son écran lorsque la fenêtre chevauche plusieurs moniteurs.
+                </small>
+              </div>
               <RangeControl
                 label="Sources simultanées"
                 value={windowSpatialization.maxSources}
@@ -612,16 +627,18 @@ export function ScenePage() {
                 unit=""
                 onChange={(maxSources) => applyWindowSpatialization({ maxSources })}
               />
-              <RangeControl
-                label="Largeur stéréo par défaut"
-                value={windowSpatialization.stereoSpread}
-                min={0}
-                max={1}
-                step={0.05}
-                unit=""
-                onChange={(stereoSpread) => applyWindowSpatialization({ stereoSpread })}
-                hint="0 centre les deux canaux ; 1 les place sur les bords de la fenêtre."
-              />
+              {windowSpatialization.emitterPlacementMode === 'proportional' && (
+                <RangeControl
+                  label="Largeur stéréo par défaut"
+                  value={windowSpatialization.stereoSpread}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  unit=""
+                  onChange={(stereoSpread) => applyWindowSpatialization({ stereoSpread })}
+                  hint="0 centre les deux canaux ; 1 les place sur les bords de la fenêtre."
+                />
+              )}
 
               {windowMode === 'displays' ? (
                 <>
@@ -814,19 +831,21 @@ export function ScenePage() {
                               { gainDb },
                             )}
                           />
-                          <RangeControl
-                            label="Écartement L/R"
-                            value={sourceRule?.stereoSpread ?? windowSpatialization.stereoSpread}
-                            min={0}
-                            max={1}
-                            step={0.05}
-                            unit=""
-                            onChange={(stereoSpread) => updateSourceRule(
-                              selectedSourceEntry.applicationId,
-                              selectedSource,
-                              { stereoSpread },
-                            )}
-                          />
+                          {windowSpatialization.emitterPlacementMode === 'proportional' && (
+                            <RangeControl
+                              label="Écartement L/R"
+                              value={sourceRule?.stereoSpread ?? windowSpatialization.stereoSpread}
+                              min={0}
+                              max={1}
+                              step={0.05}
+                              unit=""
+                              onChange={(stereoSpread) => updateSourceRule(
+                                selectedSourceEntry.applicationId,
+                                selectedSource,
+                                { stereoSpread },
+                              )}
+                            />
+                          )}
                           <label className="material-select">
                             <span>Écran de repli</span>
                             <select
