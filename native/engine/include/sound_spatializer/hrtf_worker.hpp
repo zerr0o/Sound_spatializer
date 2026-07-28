@@ -19,6 +19,9 @@ struct HrtfPreparationRequest {
     std::array<float, kMaximumBinauralSources> speaker_gains{};
     std::size_t source_count{2};
     Quaternionf world_to_head{};
+    // Bit i requests phantom-centre compensation for the emitter pair
+    // (2i, 2i+1). See PhantomCentreCompensator.
+    std::uint32_t compensated_pair_mask{};
     bool room_enabled{};
 };
 

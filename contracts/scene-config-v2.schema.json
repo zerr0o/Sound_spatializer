@@ -88,7 +88,8 @@
       "required": ["profileId", "sofaPath"],
       "properties": {
         "profileId": { "type": "string", "minLength": 1 },
-        "sofaPath": { "type": ["string", "null"] }
+        "sofaPath": { "type": ["string", "null"] },
+        "phantomCentreCompensation": { "type": "boolean", "default": true }
       }
     },
     "headphoneEq": {

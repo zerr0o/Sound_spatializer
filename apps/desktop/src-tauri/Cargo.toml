@@ -1,6 +1,6 @@
 [package]
 name = "sound-spatializer-desktop"
-version = "0.2.0"
+version = "0.2.1"
 description = "Interface desktop de Sound Spatializer"
 authors = ["Sound Spatializer contributors"]
 edition = "2021"

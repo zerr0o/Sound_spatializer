@@ -103,7 +103,9 @@ export interface WireSceneConfigV2 {
   listener: WireSceneConfigV1['listener'];
   speakers: [WireSpeakerV2, WireSpeakerV2, WireSpeakerV2, WireSpeakerV2, WireSpeakerV2];
   lfe: { enabled: boolean; gainDb: number };
-  hrtf: WireSceneConfigV1['hrtf'];
+  // Optional so a configuration persisted before the correction existed still
+  // loads; the engine applies its own default when the field is absent.
+  hrtf: WireSceneConfigV1['hrtf'] & { phantomCentreCompensation?: boolean };
   headphoneEq: WireSceneConfigV1['headphoneEq'];
   room: WireSceneConfigV1['room'];
 }

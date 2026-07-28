@@ -535,9 +535,15 @@ void append_bands(std::ostringstream& output, const MaterialBands& value) {
     }
 
     const auto& hrtf = object(field(root_object, "hrtf"), "hrtf");
-    reject_unknown_fields(hrtf, {"profileId", "sofaPath"}, "hrtf");
+    reject_unknown_fields(hrtf, {"profileId", "sofaPath", "phantomCentreCompensation"}, "hrtf");
     scene.hrtf.profile_id = string(field(hrtf, "profileId"), "hrtf.profileId");
     scene.hrtf.sofa_path = nullable_string(field(hrtf, "sofaPath"), "hrtf.sofaPath");
+    // Optional so a scene persisted before the correction existed still loads,
+    // and adopts the default rather than being rejected.
+    if (const JsonValue* compensation = optional_field(hrtf, "phantomCentreCompensation")) {
+        scene.hrtf.phantom_centre_compensation =
+            boolean(*compensation, "hrtf.phantomCentreCompensation");
+    }
 
     const auto& headphone_eq = object(field(root_object, "headphoneEq"), "headphoneEq");
     reject_unknown_fields(headphone_eq, {"enabled", "preampDb", "filters"}, "headphoneEq");
@@ -800,7 +806,9 @@ std::string scene_config_to_json(const SceneConfigV2& scene) {
     output << "],\"lfe\":{\"enabled\":" << (scene.lfe.enabled ? "true" : "false")
            << ",\"gainDb\":" << scene.lfe.gain_db << '}';
     output << ",\"hrtf\":{\"profileId\":"; append_escaped(output, scene.hrtf.profile_id);
-    output << ",\"sofaPath\":"; append_optional_string(output, scene.hrtf.sofa_path); output << '}';
+    output << ",\"sofaPath\":"; append_optional_string(output, scene.hrtf.sofa_path);
+    output << ",\"phantomCentreCompensation\":"
+           << (scene.hrtf.phantom_centre_compensation ? "true" : "false") << '}';
     output << ",\"headphoneEq\":{\"enabled\":" << (scene.headphone_eq.enabled ? "true" : "false")
            << ",\"preampDb\":" << scene.headphone_eq.preamp_db << ",\"filters\":[";
     for (std::size_t index = 0; index < scene.headphone_eq.sections.size(); ++index) {

@@ -168,6 +168,43 @@ private:
 [[nodiscard]] StereoFrame downmix_programme_to_stereo(const ProgrammeFrame& input,
                                                        float rendered_lfe) noexcept;
 
+// Applies the inverse common transfer function published by the active HRTF
+// provider. It sits on the binaural bus rather than inside every HRIR because
+// the component it removes does not depend on direction: one stereo FIR is
+// exactly equivalent to equalizing all thirty-six paths, costs a fraction as
+// much, and covers the reflected field of the room decoder for free.
+//
+// "No equalization" is carried as a unit impulse rather than as a bypass flag,
+// so enabling and disabling the correction uses the same bounded crossfade as
+// any other filter change and can never click.
+class DiffuseFieldEqualizer {
+public:
+    static constexpr std::size_t kMaximumTaps = 128;
+
+    DiffuseFieldEqualizer() noexcept;
+    void reset() noexcept;
+    // An empty span installs the unit impulse.
+    void set_filter(std::span<const float> taps, std::uint32_t transition_frames) noexcept;
+    void process(StereoFrame* frames, std::size_t frame_count) noexcept;
+
+    [[nodiscard]] bool transitioning() const noexcept { return remaining_frames_ != 0; }
+    [[nodiscard]] std::size_t active_taps() const noexcept { return current_taps_; }
+
+private:
+    [[nodiscard]] static float convolve(const float* history, const float* coefficients,
+                                        std::size_t tap_count) noexcept;
+
+    std::array<float, kMaximumTaps> current_{};
+    std::array<float, kMaximumTaps> target_{};
+    std::array<std::array<float, kMaximumTaps * 2>, 2> history_{};
+    std::size_t current_taps_{1};
+    std::size_t target_taps_{1};
+    std::size_t history_index_{};
+    float mix_{};
+    float step_{};
+    std::uint32_t remaining_frames_{};
+};
+
 class StereoParametricEq {
 public:
     [[nodiscard]] bool configure(std::span<const BiquadParameters> sections,

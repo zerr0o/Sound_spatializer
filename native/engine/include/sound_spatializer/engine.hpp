@@ -72,6 +72,7 @@ private:
         float prediction_limit_ms{20.0F};
         float lfe_gain_db{};
         bool eq_enabled{};
+        bool phantom_centre_compensation{true};
         bool lfe_enabled{true};
         bool room_enabled{};
         bool late_reverb_enabled{};
@@ -134,6 +135,7 @@ private:
     std::uint64_t room_filter_scene_revision_{};
     std::atomic<std::uint32_t> tracking_state_{static_cast<std::uint32_t>(TrackingState::unavailable)};
     BinauralConvolver convolver_{};
+    DiffuseFieldEqualizer diffuse_field_eq_{};
     BypassCrossfade bypass_crossfade_{};
     StereoParametricEq headphone_eq_{};
     TruePeakLimiter limiter_{};

@@ -35,6 +35,7 @@ public:
         world_to_head_[1].store(bits(request.world_to_head.x), std::memory_order_relaxed);
         world_to_head_[2].store(bits(request.world_to_head.y), std::memory_order_relaxed);
         world_to_head_[3].store(bits(request.world_to_head.z), std::memory_order_relaxed);
+        compensated_pair_mask_.store(request.compensated_pair_mask, std::memory_order_relaxed);
         room_enabled_.store(request.room_enabled ? 1U : 0U, std::memory_order_relaxed);
         guard_.fetch_add(1, std::memory_order_release);
         published_generation_.store(request.generation, std::memory_order_release);
@@ -68,6 +69,7 @@ public:
                 value(world_to_head_[2].load(std::memory_order_relaxed)),
                 value(world_to_head_[3].load(std::memory_order_relaxed)),
             };
+            request.compensated_pair_mask = compensated_pair_mask_.load(std::memory_order_relaxed);
             request.room_enabled = room_enabled_.load(std::memory_order_relaxed) != 0;
             const std::uint64_t end = guard_.load(std::memory_order_acquire);
             if (begin == end)
@@ -101,6 +103,7 @@ private:
     std::array<std::atomic<std::uint32_t>, kMaximumBinauralSources> gains_{};
     std::atomic<std::uint32_t> source_count_{2};
     std::array<std::atomic<std::uint32_t>, 4> world_to_head_{};
+    std::atomic<std::uint32_t> compensated_pair_mask_{};
     std::atomic<std::uint32_t> room_enabled_{};
 };
 
@@ -180,8 +183,19 @@ struct HrtfPreparationWorker::Impl {
         update.scene_revision = request.scene_revision;
         update.valid = false;
         if (request.database != nullptr) {
+            // The compensation cache is keyed on emitter geometry alone. A new
+            // scene revision can reassign a slot to a different application and
+            // a new database changes every response, so drop it in both cases
+            // rather than reusing a correction designed for something else.
+            if (request.scene_revision != compensator_scene_revision ||
+                request.database != compensator_database) {
+                compensator.reset();
+                compensator_scene_revision = request.scene_revision;
+                compensator_database = request.database;
+            }
             update.valid = build_binaural_filter_bank(*request.database, request.head_relative_directions,
-                                                      request.speaker_gains, request.source_count, update.filters);
+                                                      request.speaker_gains, request.source_count, update.filters,
+                                                      request.compensated_pair_mask, &compensator);
         }
         if (!direct_ready_slots.try_push(slot)) {
             release_direct_slot(slot);
@@ -286,6 +300,9 @@ struct HrtfPreparationWorker::Impl {
     std::atomic<std::uint64_t> latest_completed{};
     std::atomic<std::uint64_t> latest_room_completed{};
     AmbisonicBinauralDecoderOrder3 projector{};
+    PhantomCentreCompensator compensator{};
+    std::uint64_t compensator_scene_revision{};
+    const IHrtfDatabase* compensator_database{};
     std::jthread thread{};
 };
 

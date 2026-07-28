@@ -282,6 +282,29 @@ export function ProfilesPage() {
 
       <section className="audio-engine-settings panel">
         <div className="eq-heading">
+          <span className="eq-icon"><AudioWaveform size={22} /></span>
+          <div>
+            <span className="eyebrow">RENDU BINAURAL</span>
+            <h2>Correction du centre fantôme</h2>
+            <p>
+              Les deux enceintes virtuelles atteignent chacune vos deux oreilles avec un léger décalage :
+              tout ce qui est commun aux canaux gauche et droit — voix, dialogues, basses — subit un filtre
+              en peigne d’une dizaine de décibels, dont la fréquence suit l’écartement des émetteurs. La
+              correction l’aplanit et laisse intacts les sons latéralisés. Désactivez-la pour comparer.
+            </p>
+          </div>
+          <div className="eq-heading-actions">
+            <Toggle
+              checked={scene.phantomCentreCompensation}
+              onChange={(phantomCentreCompensation) => patchScene({ phantomCentreCompensation })}
+              label={scene.phantomCentreCompensation ? 'Activée' : 'Désactivée'}
+            />
+          </div>
+        </div>
+      </section>
+
+      <section className="audio-engine-settings panel">
+        <div className="eq-heading">
           <span className="eq-icon"><Gauge size={22} /></span>
           <div><span className="eyebrow">MOTEUR AUDIO</span><h2>Latence et niveau de sortie</h2><p>Adaptez le chemin WASAPI au casque sélectionné. Un changement de mode peut rouvrir le périphérique audio.</p></div>
         </div>

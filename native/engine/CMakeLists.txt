@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(SoundSpatializerEngine VERSION 0.2.0 LANGUAGES CXX)
+project(SoundSpatializerEngine VERSION 0.2.1 LANGUAGES CXX)
 
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -19,6 +19,7 @@ add_library(sound_spatializer_engine STATIC
     src/hrtf_worker.cpp
     src/ipc.cpp
     src/pose.cpp
+    src/spectral.cpp
     src/window_audio.cpp
 )
 

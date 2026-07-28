@@ -64,6 +64,7 @@ export const defaultScene: SceneConfigV2 = {
     neutralPose: { x: 0, y: 0, z: 0, w: 1 },
   },
   hrtfProfileId: 'sadie-d2-kemar',
+  phantomCentreCompensation: true,
   importedSofaHash: null,
   importedSofaPath: null,
   headphoneEq: {

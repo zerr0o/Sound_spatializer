@@ -32,7 +32,8 @@
   "lfe": { "enabled": true, "gainDb": 0 },
   "hrtf": {
     "profileId": "sadie-d2-kemar",
-    "sofaPath": null
+    "sofaPath": null,
+    "phantomCentreCompensation": true
   },
   "headphoneEq": {
     "enabled": false,

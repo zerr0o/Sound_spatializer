@@ -8,6 +8,7 @@
 #include "sound_spatializer/ipc.hpp"
 #include "sound_spatializer/latency_statistics.hpp"
 #include "sound_spatializer/pose.hpp"
+#include "sound_spatializer/spectral.hpp"
 #include "sound_spatializer/spsc_ring_buffer.hpp"
 
 #include <algorithm>
@@ -15,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -664,6 +666,206 @@ void test_measured_sofa_itd_when_available() {
 #endif
 }
 
+void test_diffuse_field_equalizer_unit_impulse_and_crossfade() {
+    DiffuseFieldEqualizer equalizer;
+    // The default is a unit impulse: a provider with nothing to remove must be
+    // bit-transparent, not merely close.
+    std::array<StereoFrame, 8> frames{};
+    for (std::size_t index = 0; index < frames.size(); ++index)
+        frames[index] = {static_cast<float>(index) * 0.125F, -static_cast<float>(index) * 0.25F};
+    const auto original = frames;
+    equalizer.process(frames.data(), frames.size());
+    for (std::size_t index = 0; index < frames.size(); ++index) {
+        CHECK(frames[index].left == original[index].left);
+        CHECK(frames[index].right == original[index].right);
+    }
+
+    // A two-tap filter must apply to both channels independently and keep the
+    // history across process() calls.
+    const std::array<float, 2> taps{0.5F, 0.25F};
+    equalizer.set_filter(taps, 0);
+    equalizer.reset();
+    CHECK(equalizer.active_taps() == 2);
+    std::array<StereoFrame, 3> impulse{StereoFrame{1.0F, -1.0F}, StereoFrame{}, StereoFrame{}};
+    equalizer.process(impulse.data(), 1);
+    equalizer.process(impulse.data() + 1, 2);
+    CHECK_NEAR(impulse[0].left, 0.5F, 1.0e-7F);
+    CHECK_NEAR(impulse[1].left, 0.25F, 1.0e-7F);
+    CHECK_NEAR(impulse[2].left, 0.0F, 1.0e-7F);
+    CHECK_NEAR(impulse[0].right, -0.5F, 1.0e-7F);
+    CHECK_NEAR(impulse[1].right, -0.25F, 1.0e-7F);
+
+    // Switching back to "no equalization" crossfades instead of jumping.
+    equalizer.reset();
+    equalizer.set_filter({}, 4);
+    CHECK(equalizer.transitioning());
+    std::array<StereoFrame, 6> ramp{};
+    ramp.fill(StereoFrame{1.0F, 1.0F});
+    equalizer.process(ramp.data(), ramp.size());
+    CHECK(!equalizer.transitioning());
+    CHECK(equalizer.active_taps() == 1);
+    // The tail is fully on the unit impulse again.
+    CHECK_NEAR(ramp[5].left, 1.0F, 1.0e-6F);
+    // ... and no intermediate sample overshot either endpoint of the fade.
+    for (const StereoFrame& frame : ramp) CHECK(frame.left > 0.0F && frame.left <= 1.0F + 1.0e-6F);
+}
+
+void test_diffuse_field_inverse_neutralizes_level_and_tilt() {
+    constexpr std::size_t kLength = 256;
+    constexpr float kBinHz = static_cast<float>(kSampleRate) / 2'048.0F;
+    std::vector<std::complex<float>> twiddles(1'024);
+    build_twiddle_table(twiddles);
+
+    const auto response_db = [&](std::span<const float> taps, float frequency_hz) {
+        std::vector<std::complex<float>> spectrum(2'048);
+        for (std::size_t tap = 0; tap < taps.size(); ++tap) spectrum[tap] = {taps[tap], 0.0F};
+        radix2_transform(spectrum, twiddles, false);
+        const std::size_t bin = static_cast<std::size_t>(std::lround(frequency_hz / kBinHz));
+        return 20.0F * std::log10(std::max(std::abs(spectrum[bin]), 1.0e-9F));
+    };
+
+    // A set that is 12 dB hot and carries a broad 3 kHz resonance, built from a
+    // resonant biquad so the designer sees something realistic rather than a
+    // synthetic magnitude it could invert exactly.
+    const BiquadCoefficients resonance =
+        design_biquad({BiquadType::peaking, 3'000.0F, 1.2F, 9.0F}, static_cast<float>(kSampleRate));
+    std::vector<float> responses(kLength * 8, 0.0F);
+    for (std::size_t index = 0; index < 8; ++index) {
+        float z1 = 0.0F;
+        float z2 = 0.0F;
+        // Vary the onset so the blocks are not all the same response.
+        const std::size_t onset = index * 2;
+        for (std::size_t tap = 0; tap < kLength; ++tap) {
+            const float input = tap == onset ? 3.981072F : 0.0F; // +12 dB impulse
+            const float output = resonance.b0 * input + z1;
+            z1 = resonance.b1 * input - resonance.a1 * output + z2;
+            z2 = resonance.b2 * input - resonance.a2 * output;
+            responses[index * kLength + tap] = output;
+        }
+    }
+
+    std::array<float, DiffuseFieldEqualizer::kMaximumTaps> taps{};
+    CHECK(design_diffuse_field_inverse(responses, kLength, kSampleRate, taps));
+    const float at_3k = response_db(taps, 3'000.0F);
+    const float at_500 = response_db(taps, 500.0F);
+    const float at_100 = response_db(taps, 100.0F);
+    std::cout << "  synthetic +12 dB set with a 3 kHz resonance -> correction " << at_500 << " dB at 500 Hz, "
+              << at_3k << " dB at 3 kHz, " << at_100 << " dB at 100 Hz\n";
+    // The level trim cancels the 12 dB offset inside the shaped band ...
+    CHECK_NEAR(at_500, -12.0F, 2.0F);
+    // ... and still reaches the bass, which is only level-trimmed and never
+    // spectrally shaped. A trim that faded out here would leave the sub-bass
+    // 12 dB louder than everything else.
+    CHECK(std::abs(at_100 - at_500) < 3.0F);
+    // The resonance is cut on top of the trim.
+    CHECK(at_3k < at_500 - 5.0F);
+
+    // A set that is already neutral must come back as an almost flat unit gain.
+    std::vector<float> neutral(kLength * 4, 0.0F);
+    for (std::size_t index = 0; index < 4; ++index) neutral[index * kLength + index] = 1.0F;
+    std::array<float, DiffuseFieldEqualizer::kMaximumTaps> neutral_taps{};
+    CHECK(design_diffuse_field_inverse(neutral, kLength, kSampleRate, neutral_taps));
+    for (const float frequency : {200.0F, 1'000.0F, 4'000.0F, 10'000.0F})
+        CHECK(std::abs(response_db(neutral_taps, frequency)) < 1.0F);
+}
+
+void test_measured_sofa_diffuse_field_equalization_when_available() {
+#if defined(SOUND_SPATIALIZER_HAS_MYSOFA)
+    const std::filesystem::path sofa_path = std::filesystem::path(SOUND_SPATIALIZER_TEST_REPOSITORY_ROOT) /
+                                            "resources" / "hrtf" / "data" / "sadie-d2-kemar.sofa";
+    if (!std::filesystem::exists(sofa_path)) {
+        std::cout << "SADIE D2 fixture not fetched; diffuse-field equalization test skipped\n";
+        return;
+    }
+    const HrtfLoadResult loaded = load_sofa_hrtf(sofa_path.string(), kSampleRate);
+    CHECK(loaded.database != nullptr);
+    if (!loaded.database) return;
+    const std::span<const float> filter = loaded.database->diffuse_field_filter();
+    CHECK(filter.size() == DiffuseFieldEqualizer::kMaximumTaps);
+    if (filter.empty()) return;
+
+    constexpr std::size_t kFft = 2'048;
+    constexpr float kBinHz = static_cast<float>(kSampleRate) / static_cast<float>(kFft);
+    std::vector<std::complex<float>> twiddles(kFft / 2);
+    build_twiddle_table(twiddles);
+    std::vector<std::complex<float>> spectrum(kFft);
+    for (std::size_t tap = 0; tap < filter.size(); ++tap) spectrum[tap] = {filter[tap], 0.0F};
+    radix2_transform(spectrum, twiddles, false);
+
+    const auto gain_db = [&](float frequency_hz) {
+        const std::size_t bin = static_cast<std::size_t>(std::lround(frequency_hz / kBinHz));
+        return 20.0F * std::log10(std::max(std::abs(spectrum[bin]), 1.0e-9F));
+    };
+    // Independent cross-check through the public query API, so a mistake in the
+    // loader's own averaging cannot hide behind itself. This is what
+    // established that the shipped SADIE sets are already diffuse-field
+    // equalized but roughly 10 dB hot.
+    std::vector<double> averaged(kFft / 2 + 1, 0.0);
+    std::size_t sampled = 0;
+    {
+        std::array<float, kMaximumHrirTaps> left{};
+        std::array<float, kMaximumHrirTaps> right{};
+        std::vector<std::complex<float>> ear_spectrum(kFft);
+        for (int azimuth = 0; azimuth < 360; azimuth += 15) {
+            for (int elevation = -60; elevation <= 60; elevation += 30) {
+                const float a = static_cast<float>(azimuth) * kPi / 180.0F;
+                const float e = static_cast<float>(elevation) * kPi / 180.0F;
+                const Vec3f direction{std::sin(a) * std::cos(e), std::sin(e), std::cos(a) * std::cos(e)};
+                std::size_t taps = 0;
+                if (!loaded.database->query(direction, left, right, taps)) continue;
+                for (const auto* ear : {&left, &right}) {
+                    std::fill(ear_spectrum.begin(), ear_spectrum.end(), std::complex<float>{});
+                    for (std::size_t tap = 0; tap < taps && tap < kFft; ++tap)
+                        ear_spectrum[tap] = {(*ear)[tap], 0.0F};
+                    radix2_transform(ear_spectrum, twiddles, false);
+                    for (std::size_t bin = 0; bin < averaged.size(); ++bin)
+                        averaged[bin] += std::norm(ear_spectrum[bin]);
+                    ++sampled;
+                }
+            }
+        }
+    }
+    CHECK(sampled > 0);
+    if (sampled == 0) return;
+    const auto measured_db = [&](float frequency_hz) {
+        const std::size_t bin = static_cast<std::size_t>(std::lround(frequency_hz / kBinHz));
+        return static_cast<float>(
+            10.0 * std::log10(std::max(averaged[bin] / static_cast<double>(sampled), 1e-20)));
+    };
+    std::cout << "  SADIE D2 direction-averaged magnitude:";
+    for (const float frequency : {200.0F, 1'000.0F, 3'000.0F, 6'000.0F, 12'000.0F})
+        std::cout << ' ' << frequency / 1'000.0F << "k:" << measured_db(frequency) << "dB";
+    std::cout << " (" << sampled << " responses)\n";
+
+    std::cout << "  SADIE D2 neutralization:";
+    for (const float frequency : {200.0F, 500.0F, 1'000.0F, 2'000.0F, 3'000.0F, 4'000.0F, 6'000.0F,
+                                  8'000.0F, 12'000.0F}) {
+        std::cout << ' ' << frequency / 1'000.0F << "k:" << gain_db(frequency) << "dB";
+    }
+    std::cout << '\n';
+
+    // Measured, not assumed. The shipped SADIE II sets are already diffuse-field
+    // equalized, so their direction-averaged response is flat within a couple of
+    // decibels and there is no midrange resonance left to remove.
+    for (const float frequency : {200.0F, 1'000.0F, 2'000.0F, 3'000.0F, 4'000.0F, 6'000.0F, 8'000.0F,
+                                  12'000.0F}) {
+        CHECK(std::abs(measured_db(frequency) - measured_db(1'000.0F)) < 3.0F);
+    }
+    // What is not neutral is the absolute level: about 10 dB hot once libmysofa
+    // has normalized on whichever measurement minimizes azimuth+elevation. Left
+    // alone it pins the true-peak limiter. The correction must therefore be an
+    // essentially flat attenuation that matches the measured excess ...
+    const float reference = gain_db(1'000.0F);
+    CHECK_NEAR(reference, -measured_db(1'000.0F), 2.0F);
+    CHECK(reference < -6.0F);
+    // ... and it must reach the bass, which the spectral shaping never touches.
+    for (const float frequency : {60.0F, 200.0F, 500.0F, 2'000.0F, 3'000.0F, 4'000.0F, 6'000.0F,
+                                  8'000.0F, 12'000.0F}) {
+        CHECK(std::abs(gain_db(frequency) - reference) < 3.0F);
+    }
+#endif
+}
+
 void test_convolver_and_morph() {
     HrirFilterBank bank{};
     bank.tap_count = 1;
@@ -860,6 +1062,230 @@ void test_sixteen_source_filter_builder_and_worker_capacity() {
         worker.release_direct(token);
     }
     CHECK(received);
+}
+
+// Measurement harness for the timbre of a virtual emitter pair. Everything a
+// listener calls "tin can" shows up here as a deviation of the correlated
+// response from its own third-octave mean.
+struct EmitterPairMeasurement {
+    static constexpr std::size_t kFftSize = 2'048;
+    static constexpr std::size_t kBins = kFftSize / 2 + 1;
+    static constexpr float kBinHz = static_cast<float>(kSampleRate) / static_cast<float>(kFftSize);
+    static constexpr float kLowHz = 500.0F;
+    static constexpr float kHighHz = 10'000.0F;
+
+    EmitterPairMeasurement() : twiddles(kFftSize / 2) { build_twiddle_table(twiddles); }
+
+    [[nodiscard]] std::vector<float> magnitude(const HrirFilterBank& bank, std::size_t source,
+                                               std::size_t ear) const {
+        std::vector<std::complex<float>> spectrum(kFftSize);
+        const auto& path = bank.path(source, ear);
+        for (std::size_t tap = 0; tap < bank.tap_count && tap < kFftSize; ++tap)
+            spectrum[tap] = {path[tap], 0.0F};
+        radix2_transform(spectrum, twiddles, false);
+        std::vector<float> result(kBins);
+        for (std::size_t bin = 0; bin < kBins; ++bin) result[bin] = std::abs(spectrum[bin]);
+        return result;
+    }
+
+    // Magnitude seen by one ear when both emitters carry the same signal.
+    [[nodiscard]] std::vector<float> correlated_magnitude(const HrirFilterBank& bank,
+                                                          std::size_t ear) const {
+        std::vector<std::complex<float>> spectrum(kFftSize);
+        const auto& left = bank.path(0, ear);
+        const auto& right = bank.path(1, ear);
+        for (std::size_t tap = 0; tap < bank.tap_count && tap < kFftSize; ++tap)
+            spectrum[tap] = {left[tap] + right[tap], 0.0F};
+        radix2_transform(spectrum, twiddles, false);
+        std::vector<float> result(kBins);
+        for (std::size_t bin = 0; bin < kBins; ++bin) result[bin] = std::abs(spectrum[bin]);
+        return result;
+    }
+
+    // Worst departure from the local third-octave mean, in dB. This is the comb.
+    [[nodiscard]] float ripple_db(const std::vector<float>& magnitudes) const {
+        std::vector<float> smoothed(magnitudes.size());
+        smooth_magnitude_fractional_octave(magnitudes, smoothed, 3.0F);
+        float worst = 0.0F;
+        for (std::size_t bin = first_bin(); bin <= last_bin(); ++bin) {
+            const float reference = std::max(smoothed[bin], 1.0e-9F);
+            const float measured = std::max(magnitudes[bin], 1.0e-9F);
+            worst = std::max(worst, std::abs(20.0F * std::log10(measured / reference)));
+        }
+        return worst;
+    }
+
+    [[nodiscard]] static float worst_difference_db(const std::vector<float>& first,
+                                                   const std::vector<float>& second) {
+        float worst = 0.0F;
+        for (std::size_t bin = first_bin(); bin <= last_bin(); ++bin) {
+            const float a = std::max(first[bin], 1.0e-9F);
+            const float b = std::max(second[bin], 1.0e-9F);
+            worst = std::max(worst, std::abs(20.0F * std::log10(a / b)));
+        }
+        return worst;
+    }
+
+    [[nodiscard]] static std::size_t first_bin() {
+        return static_cast<std::size_t>(std::ceil(kLowHz / kBinHz));
+    }
+    [[nodiscard]] static std::size_t last_bin() {
+        return static_cast<std::size_t>(std::floor(kHighHz / kBinHz));
+    }
+
+    [[nodiscard]] static bool build_pair(const IHrtfDatabase& database, float half_angle_degrees,
+                                         bool compensate, PhantomCentreCompensator& compensator,
+                                         HrirFilterBank& bank) {
+        const float radians = half_angle_degrees * kPi / 180.0F;
+        std::array<Vec3f, kMaximumBinauralSources> directions{};
+        std::array<float, kMaximumBinauralSources> gains{};
+        directions[0] = {-std::sin(radians), 0.0F, std::cos(radians)};
+        directions[1] = {std::sin(radians), 0.0F, std::cos(radians)};
+        gains[0] = 1.0F;
+        gains[1] = 1.0F;
+        return build_binaural_filter_bank(database, directions, gains, 2, bank,
+                                          compensate ? 0x1U : 0x0U, &compensator);
+    }
+
+    std::vector<std::complex<float>> twiddles;
+};
+
+void test_phantom_centre_compensation_flattens_the_inter_emitter_comb() {
+    const EmitterPairMeasurement measurement{};
+    const AnalyticHrtfDatabase hrtf{kSampleRate};
+
+    // Endpoint loudspeakers sit at +-30 degrees; a window emitter pair sweeps
+    // the whole range below as the window is moved and resized.
+    for (const float half_angle : {30.0F, 22.0F, 15.0F, 8.0F}) {
+        PhantomCentreCompensator plain_compensator;
+        PhantomCentreCompensator compensator;
+        HrirFilterBank plain{};
+        HrirFilterBank corrected{};
+        CHECK(EmitterPairMeasurement::build_pair(hrtf, half_angle, false, plain_compensator, plain));
+        CHECK(EmitterPairMeasurement::build_pair(hrtf, half_angle, true, compensator, corrected));
+
+        // The correction must stay on the zero-latency direct path.
+        CHECK(corrected.tap_count <= kTimeDomainHrirTaps);
+
+        float plain_ripple = 0.0F;
+        float corrected_ripple = 0.0F;
+        float panned_shift = 0.0F;
+        for (std::size_t ear = 0; ear < 2; ++ear) {
+            plain_ripple = std::max(plain_ripple,
+                                    measurement.ripple_db(measurement.correlated_magnitude(plain, ear)));
+            corrected_ripple =
+                std::max(corrected_ripple,
+                         measurement.ripple_db(measurement.correlated_magnitude(corrected, ear)));
+            panned_shift = std::max(
+                panned_shift, EmitterPairMeasurement::worst_difference_db(
+                                  measurement.magnitude(corrected, 0, ear), measurement.magnitude(plain, 0, ear)));
+        }
+        std::cout << "  emitter pair +-" << half_angle << " deg: correlated ripple " << plain_ripple
+                  << " dB -> " << corrected_ripple << " dB, hard-panned shift " << panned_shift
+                  << " dB, taps " << corrected.tap_count << '\n';
+
+        // The uncompensated pair must actually exhibit the defect, otherwise the
+        // harness is measuring nothing.
+        CHECK(plain_ripple > 7.0F);
+        CHECK(corrected_ripple < 3.0F);
+        CHECK(plain_ripple - corrected_ripple > 4.0F);
+        // A hard-panned source has a mid component, so it cannot be perfectly
+        // untouched. Bound the collateral instead of pretending it is zero.
+        CHECK(panned_shift < 6.0F);
+    }
+
+    // A muted or absent partner has nothing to interfere with: the compensator
+    // must leave that pair exactly as the database returned it.
+    PhantomCentreCompensator compensator;
+    std::array<Vec3f, kMaximumBinauralSources> directions{};
+    std::array<float, kMaximumBinauralSources> gains{};
+    directions[0] = {-0.5F, 0.0F, 1.0F};
+    directions[1] = {0.5F, 0.0F, 1.0F};
+    gains[0] = 1.0F;
+    gains[1] = 0.0F;
+    HrirFilterBank solo{};
+    HrirFilterBank solo_reference{};
+    CHECK(build_binaural_filter_bank(hrtf, directions, gains, 2, solo, 0x1U, &compensator));
+    CHECK(build_binaural_filter_bank(hrtf, directions, gains, 2, solo_reference));
+    CHECK(solo.tap_count == solo_reference.tap_count);
+    for (std::size_t tap = 0; tap < solo.tap_count; ++tap)
+        CHECK_NEAR(solo.path(0, 0)[tap], solo_reference.path(0, 0)[tap], 1.0e-6F);
+
+    // Repeating the same geometry must reuse the cached correction and produce
+    // the identical bank; the worker relies on that to survive head tracking.
+    HrirFilterBank first{};
+    HrirFilterBank second{};
+    PhantomCentreCompensator cached;
+    CHECK(EmitterPairMeasurement::build_pair(hrtf, 22.0F, true, cached, first));
+    CHECK(EmitterPairMeasurement::build_pair(hrtf, 22.0F, true, cached, second));
+    for (std::size_t tap = 0; tap < first.tap_count; ++tap)
+        CHECK_NEAR(first.path(0, 0)[tap], second.path(0, 0)[tap], 1.0e-7F);
+}
+
+void test_measured_sofa_render_level_stays_off_the_limiter() {
+#if defined(SOUND_SPATIALIZER_HAS_MYSOFA)
+    const std::filesystem::path sofa_path = std::filesystem::path(SOUND_SPATIALIZER_TEST_REPOSITORY_ROOT) /
+                                            "resources" / "hrtf" / "data" / "sadie-d2-kemar.sofa";
+    if (!std::filesystem::exists(sofa_path)) {
+        std::cout << "SADIE D2 fixture not fetched; render level test skipped\n";
+        return;
+    }
+    const HrtfLoadResult loaded = load_sofa_hrtf(sofa_path.string(), kSampleRate);
+    CHECK(loaded.database != nullptr);
+    if (!loaded.database) return;
+
+    constexpr std::size_t kFft = 2'048;
+    constexpr float kBinHz = static_cast<float>(kSampleRate) / static_cast<float>(kFft);
+    std::vector<std::complex<float>> twiddles(kFft / 2);
+    build_twiddle_table(twiddles);
+    const auto transform = [&](std::span<const float> taps, std::size_t count) {
+        std::vector<std::complex<float>> spectrum(kFft);
+        for (std::size_t tap = 0; tap < count && tap < kFft; ++tap) spectrum[tap] = {taps[tap], 0.0F};
+        radix2_transform(spectrum, twiddles, false);
+        return spectrum;
+    };
+
+    PhantomCentreCompensator compensator;
+    HrirFilterBank bank{};
+    CHECK(EmitterPairMeasurement::build_pair(*loaded.database, 30.0F, true, compensator, bank));
+
+    const std::span<const float> neutralization = loaded.database->diffuse_field_filter();
+    const std::vector<std::complex<float>> equalizer = transform(neutralization, neutralization.size());
+
+    // Broadband gain applied to content that is correlated between the two
+    // emitters, which is the loudest case the limiter ever sees.
+    const auto correlated_gain_db = [&](bool with_equalizer) {
+        double power = 0.0;
+        std::size_t counted = 0;
+        for (std::size_t ear = 0; ear < 2; ++ear) {
+            const std::vector<std::complex<float>> left = transform(bank.path(0, ear), bank.tap_count);
+            const std::vector<std::complex<float>> right = transform(bank.path(1, ear), bank.tap_count);
+            for (std::size_t bin = 0; bin < kFft / 2 + 1; ++bin) {
+                const float frequency = static_cast<float>(bin) * kBinHz;
+                if (frequency < 200.0F || frequency > 10'000.0F) continue;
+                std::complex<float> summed = left[bin] + right[bin];
+                if (with_equalizer) summed *= equalizer[bin];
+                power += std::norm(summed);
+                ++counted;
+            }
+        }
+        return 10.0F * std::log10(std::max(power / std::max<std::size_t>(counted, 1), 1e-20));
+    };
+
+    const float raw_gain = correlated_gain_db(false);
+    const float neutral_gain = correlated_gain_db(true);
+    std::cout << "  SADIE D2 correlated render gain: " << raw_gain << " dB raw -> " << neutral_gain
+              << " dB neutralized\n";
+
+    // The provider on its own is far hotter than unity. With a -6 dB master gain
+    // and a -0.1 dBFS ceiling, that alone puts the zero-lookahead limiter into
+    // permanent deep reduction on ordinary programme material.
+    CHECK(raw_gain > 12.0F);
+    // Neutralized, only the coherent summation of the two emitters is left,
+    // which is the same few decibels a real loudspeaker pair produces.
+    CHECK(neutral_gain > -3.0F);
+    CHECK(neutral_gain < 8.0F);
+#endif
 }
 
 void test_partitioned_convolver_matches_time_domain_reference() {
@@ -1518,6 +1944,9 @@ void test_scene_v1_migration_and_v2_roundtrip() {
         CHECK(migrated_json.find("\"inputLayout\":\"stereo\"") != std::string::npos);
         CHECK(migrated_json.find("\"front-center\"") != std::string::npos);
         CHECK(migrated_json.find("\"lfe\":") != std::string::npos);
+        // A scene written before the phantom-centre correction existed carries
+        // no such field and must adopt the default rather than be rejected.
+        CHECK(migrated.value->hrtf.phantom_centre_compensation);
         const auto reparsed = scene_config_from_json(migrated_json);
         CHECK(reparsed);
         if (reparsed) {
@@ -1525,6 +1954,7 @@ void test_scene_v1_migration_and_v2_roundtrip() {
             CHECK(reparsed.value->audio.input_layout == InputLayout::stereo);
             CHECK(!reparsed.value->speakers[0].enabled);
             CHECK(reparsed.value->speakers[4].channel == SpeakerChannel::surround_right);
+            CHECK(reparsed.value->hrtf.phantom_centre_compensation);
         }
     }
 
@@ -1539,6 +1969,7 @@ void test_scene_v1_migration_and_v2_roundtrip() {
     surround.speakers[2].enabled = false;
     surround.speakers[3].gain_db = -2.0F;
     surround.speakers[4].position_m.z = -1.25F;
+    surround.hrtf.phantom_centre_compensation = false;
     std::string validation_error;
     CHECK(validate_scene_config(surround, validation_error));
     const std::string v2_json = scene_config_to_json(surround);
@@ -1555,6 +1986,7 @@ void test_scene_v1_migration_and_v2_roundtrip() {
         CHECK_NEAR(v2_roundtrip.value->audio.master_gain_db, -9.0F, 1.0e-6F);
         CHECK(!v2_roundtrip.value->lfe.enabled);
         CHECK_NEAR(v2_roundtrip.value->lfe.gain_db, -4.5F, 1.0e-6F);
+        CHECK(!v2_roundtrip.value->hrtf.phantom_centre_compensation);
         for (std::size_t source = 0; source < kDirectionalSourceCount; ++source) {
             CHECK(v2_roundtrip.value->speakers[source].channel == surround.speakers[source].channel);
             CHECK(v2_roundtrip.value->speakers[source].enabled == surround.speakers[source].enabled);
@@ -3347,10 +3779,15 @@ int main() {
     test_hrtf_worker_latest_wins_and_prepared_room_filters();
     test_hrtf_worker_publishes_direct_before_failed_room();
     test_measured_sofa_itd_when_available();
+    test_diffuse_field_equalizer_unit_impulse_and_crossfade();
+    test_diffuse_field_inverse_neutralizes_level_and_tilt();
+    test_measured_sofa_diffuse_field_equalization_when_available();
     test_convolver_and_morph();
     test_five_source_two_ear_convolver_channel_isolation();
     test_sixteen_source_two_ear_convolver_capacity_and_isolation();
     test_sixteen_source_filter_builder_and_worker_capacity();
+    test_phantom_centre_compensation_flattens_the_inter_emitter_comb();
+    test_measured_sofa_render_level_stays_off_the_limiter();
     test_partitioned_convolver_matches_time_domain_reference();
     test_partitioned_convolver_morph_and_interruption();
     test_lfe_symmetric_low_pass_and_downmix();

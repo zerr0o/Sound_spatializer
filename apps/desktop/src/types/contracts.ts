@@ -112,6 +112,8 @@ export interface SceneConfigV2 {
   lfe: LfeConfig;
   listener: ListenerConfig;
   hrtfProfileId: string;
+  /** Removes the comb two coherent virtual emitters impose on correlated content. */
+  phantomCentreCompensation: boolean;
   importedSofaHash: string | null;
   importedSofaPath: string | null;
   headphoneEq: HeadphoneEqConfig;

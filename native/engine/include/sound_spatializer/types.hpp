@@ -190,6 +190,15 @@ struct TrackingConfig {
 struct HrtfConfig {
     std::string profile_id{"builtin-analytic-neutral"};
     std::optional<std::string> sofa_path{};
+    // Removes the comb that two coherent virtual emitters impose on whatever is
+    // correlated between them. Enabled by default: it does not add an effect,
+    // it removes one the renderer creates. Switchable so it can be A/B compared.
+    //
+    // The provider's own level and spectral normalization is deliberately not
+    // exposed here. It corrects the arbitrary absolute level of a SOFA set, and
+    // a set left uncorrected pins the true-peak limiter; that is a defect, not
+    // a taste.
+    bool phantom_centre_compensation{true};
 };
 
 struct SceneConfigV2 {

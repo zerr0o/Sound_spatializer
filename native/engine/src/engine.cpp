@@ -153,6 +153,7 @@ bool SpatialAudioEngine::prepare_scene(const SceneConfigV2& scene, PreparedScene
     prepared.prediction_limit_ms = scene.tracking.prediction_limit_ms;
     prepared.lfe_gain_db = scene.lfe.gain_db;
     prepared.eq_enabled = scene.headphone_eq.enabled;
+    prepared.phantom_centre_compensation = scene.hrtf.phantom_centre_compensation;
     prepared.lfe_enabled = scene.audio.input_layout == InputLayout::surround_5_1 && scene.lfe.enabled;
     prepared.room_enabled = scene.room.enabled;
     prepared.late_reverb_enabled = scene.room.late_reverb_enabled;
@@ -625,6 +626,14 @@ void SpatialAudioEngine::apply_prepared_scene(const PreparedScene& prepared, boo
         (void)headphone_eq_.configure(eq_sections, static_cast<float>(kSampleRate));
     }
     headphone_eq_.set_enabled(active_scene_.eq_enabled);
+    // The provider owns its own neutralization curve; switching profiles swaps
+    // it. An empty span falls back to a unit impulse, so a provider that needs
+    // no correction and a profile change take the same crossfade.
+    const std::span<const float> diffuse_field = active_scene_.hrtf != nullptr
+                                                     ? active_scene_.hrtf->diffuse_field_filter()
+                                                     : std::span<const float>{};
+    diffuse_field_eq_.set_filter(diffuse_field, realtime_transition ? 4'800U : 0U);
+    if (!realtime_transition) diffuse_field_eq_.reset();
     if (realtime_transition) {
         bypass_crossfade_.set_bypassed(active_scene_.bypass, 480U);
     } else {
@@ -720,6 +729,16 @@ void SpatialAudioEngine::request_hrtf_for_pose(const Quaternionf& orientation) n
             request.head_relative_directions[index] =
                 rotate(world_to_head, world_direction);
         }
+    }
+    if (active_scene_.phantom_centre_compensation) {
+        // Only genuine stereo emitter pairs comb. In endpoint mode that is the
+        // front left/right pair; the 5.1 centre and surrounds are not a pair in
+        // that sense. In window mode every application owns a stereo pair, and
+        // the endpoint fallback keeps its own at indices 0/1.
+        const std::size_t pairs =
+            std::min(request.source_count / 2, PhantomCentreCompensator::kPairCount);
+        request.compensated_pair_mask =
+            active_window_audio_rendering_ ? (1U << pairs) - 1U : 0x1U;
     }
     hrtf_worker_.submit_latest(request);
     last_requested_filter_orientation_ = normalized_orientation;
@@ -1138,6 +1157,10 @@ void SpatialAudioEngine::process_chunk(const ProgrammeFrame* input, StereoFrame*
             output[index].right = output[index].right * dry_gain + room_binaural_[index].right * wet_gain;
         }
     }
+    // Everything above this point went through an HRTF, direct or reflected, so
+    // it all carries the set's common transfer function exactly once. The LFE
+    // bed below is head-invariant and must not be equalized.
+    diffuse_field_eq_.process(output, frame_count);
     constexpr float equal_power_mono = 0.70710678F;
     for (std::size_t index = 0; index < frame_count; ++index) {
         const float lfe = lfe_bed_[index] * equal_power_mono;

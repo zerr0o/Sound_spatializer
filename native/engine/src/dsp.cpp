@@ -1,5 +1,7 @@
 #include "sound_spatializer/dsp.hpp"
 
+#include "sound_spatializer/spectral.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -79,44 +81,14 @@ struct BinauralConvolver::PartitionedState {
     using OutputCache = std::array<OutputBlock, kOutputBlockSlots>;
 
     PartitionedState() noexcept {
-        for (std::size_t index = 0; index < twiddles.size(); ++index) {
-            const float phase = -2.0F * kPi * static_cast<float>(index) / static_cast<float>(kFftSize);
-            twiddles[index] = {std::cos(phase), std::sin(phase)};
-        }
+        build_twiddle_table(twiddles);
         input_sequences.fill(kInvalidSequence);
         invalidate(current_output);
         invalidate(target_output);
     }
 
     void transform(Spectrum& values, bool inverse) const noexcept {
-        for (std::size_t source = 1, destination = 0; source < kFftSize; ++source) {
-            std::size_t bit = kFftSize >> 1U;
-            while ((destination & bit) != 0U) {
-                destination ^= bit;
-                bit >>= 1U;
-            }
-            destination ^= bit;
-            if (source < destination) std::swap(values[source], values[destination]);
-        }
-
-        for (std::size_t length = 2; length <= kFftSize; length <<= 1U) {
-            const std::size_t half = length >> 1U;
-            const std::size_t twiddle_step = kFftSize / length;
-            for (std::size_t start = 0; start < kFftSize; start += length) {
-                for (std::size_t offset = 0; offset < half; ++offset) {
-                    std::complex<float> twiddle = twiddles[offset * twiddle_step];
-                    if (inverse) twiddle = std::conj(twiddle);
-                    const std::complex<float> even = values[start + offset];
-                    const std::complex<float> odd = values[start + offset + half] * twiddle;
-                    values[start + offset] = even + odd;
-                    values[start + offset + half] = even - odd;
-                }
-            }
-        }
-        if (inverse) {
-            constexpr float scale = 1.0F / static_cast<float>(kFftSize);
-            for (auto& value : values) value *= scale;
-        }
+        radix2_transform(values, twiddles, inverse);
     }
 
     void build_filter(const HrirFilterBank& bank, FilterSpectra& output) noexcept {
@@ -607,6 +579,96 @@ StereoFrame downmix_programme_to_stereo(const ProgrammeFrame& input, float rende
         input.front_left + minus_three_db * (input.front_center + input.surround_left + rendered_lfe),
         input.front_right + minus_three_db * (input.front_center + input.surround_right + rendered_lfe),
     };
+}
+
+DiffuseFieldEqualizer::DiffuseFieldEqualizer() noexcept {
+    current_[0] = 1.0F;
+    target_[0] = 1.0F;
+}
+
+void DiffuseFieldEqualizer::reset() noexcept {
+    for (auto& channel : history_) channel.fill(0.0F);
+    history_index_ = 0;
+    mix_ = 0.0F;
+    step_ = 0.0F;
+    remaining_frames_ = 0;
+}
+
+void DiffuseFieldEqualizer::set_filter(std::span<const float> taps,
+                                       std::uint32_t transition_frames) noexcept {
+    std::array<float, kMaximumTaps> requested{};
+    std::size_t requested_taps = std::min(taps.size(), kMaximumTaps);
+    if (requested_taps == 0) {
+        requested[0] = 1.0F;
+        requested_taps = 1;
+    } else {
+        std::copy_n(taps.begin(), requested_taps, requested.begin());
+    }
+
+    // A pending transition is frozen at its current position before a new one
+    // starts, so a burst of profile changes cannot leave a stale target behind.
+    if (remaining_frames_ != 0) {
+        for (std::size_t tap = 0; tap < kMaximumTaps; ++tap)
+            current_[tap] = current_[tap] * (1.0F - mix_) + target_[tap] * mix_;
+        current_taps_ = std::max(current_taps_, target_taps_);
+        remaining_frames_ = 0;
+        mix_ = 0.0F;
+        step_ = 0.0F;
+    }
+    if (requested == current_ && requested_taps == current_taps_) return;
+
+    target_ = requested;
+    target_taps_ = requested_taps;
+    if (transition_frames == 0) {
+        current_ = target_;
+        current_taps_ = target_taps_;
+        mix_ = 0.0F;
+        step_ = 0.0F;
+        return;
+    }
+    mix_ = 0.0F;
+    step_ = 1.0F / static_cast<float>(transition_frames);
+    remaining_frames_ = transition_frames;
+}
+
+float DiffuseFieldEqualizer::convolve(const float* history, const float* coefficients,
+                                      std::size_t tap_count) noexcept {
+    float sum = 0.0F;
+    for (std::size_t tap = 0; tap < tap_count; ++tap) sum += history[tap] * coefficients[tap];
+    return sum;
+}
+
+void DiffuseFieldEqualizer::process(StereoFrame* frames, std::size_t frame_count) noexcept {
+    if (frames == nullptr) return;
+    for (std::size_t frame = 0; frame < frame_count; ++frame) {
+        history_index_ = (history_index_ + kMaximumTaps - 1) % kMaximumTaps;
+        const float channels[2]{frames[frame].left, frames[frame].right};
+        for (std::size_t channel = 0; channel < 2; ++channel) {
+            history_[channel][history_index_] = channels[channel];
+            history_[channel][history_index_ + kMaximumTaps] = channels[channel];
+        }
+        const bool blending = remaining_frames_ != 0;
+        float filtered[2]{};
+        for (std::size_t channel = 0; channel < 2; ++channel) {
+            const float* history = history_[channel].data() + history_index_;
+            filtered[channel] = convolve(history, current_.data(), current_taps_);
+            if (blending) {
+                const float replacement = convolve(history, target_.data(), target_taps_);
+                filtered[channel] = filtered[channel] * (1.0F - mix_) + replacement * mix_;
+            }
+        }
+        frames[frame] = {filtered[0], filtered[1]};
+        if (blending) {
+            mix_ += step_;
+            --remaining_frames_;
+            if (remaining_frames_ == 0) {
+                current_ = target_;
+                current_taps_ = target_taps_;
+                mix_ = 0.0F;
+                step_ = 0.0F;
+            }
+        }
+    }
 }
 
 bool StereoParametricEq::configure(std::span<const BiquadParameters> sections, float sample_rate) noexcept {

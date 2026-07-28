@@ -169,7 +169,11 @@ export const toWireSceneConfig = (scene: SceneConfigV2): WireSceneConfigV2 => ({
     };
   }) as WireSceneConfigV2['speakers'],
   lfe: { enabled: !scene.lfe.muted, gainDb: clamp(scene.lfe.gainDb, -60, 12) },
-  hrtf: { profileId: scene.hrtfProfileId, sofaPath: scene.importedSofaPath },
+  hrtf: {
+    profileId: scene.hrtfProfileId,
+    sofaPath: scene.importedSofaPath,
+    phantomCentreCompensation: scene.phantomCentreCompensation,
+  },
   headphoneEq: {
     enabled: scene.headphoneEq.enabled,
     preampDb: clamp(scene.headphoneEq.preampDb, -24, 0),
@@ -242,6 +246,11 @@ const sceneFromWireCommon = (
     listener: { position: vec(wire.listener.positionM), neutralPose: quaternionFromWire(wire.listener.neutralOrientation) },
     hrtfProfileId: wire.hrtf.profileId,
     importedSofaPath: wire.hrtf.sofaPath,
+    // Absent from a v1 scene and from any v2 scene written before the
+    // correction existed. Both must adopt the default rather than silently
+    // disabling it.
+    phantomCentreCompensation:
+      !('phantomCentreCompensation' in wire.hrtf) || wire.hrtf.phantomCentreCompensation !== false,
     headphoneEq: {
       ...base.headphoneEq,
       enabled: wire.headphoneEq.enabled,
