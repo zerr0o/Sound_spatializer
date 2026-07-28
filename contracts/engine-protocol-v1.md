@@ -37,7 +37,7 @@ may omit it and implicitly use zero.
 
 | Type | Additional fields |
 | --- | --- |
-| `start`, `stop` | none |
+| `start`, `stop`, `shutdown` | none |
 | `set-bypass` | `enabled: boolean` |
 | `set-output-device` | `deviceId: string` |
 | `set-audio-route` | `captureProvider: native-driver \| external-render`, `captureEndpointId: string\|null`, `outputDeviceId: string` |
@@ -47,6 +47,14 @@ may omit it and implicitly use zero.
 | `set-hrtf` | `profileId: string`, `sofaPath: string|null` |
 | `set-headphone-eq` | `eq: {enabled,preampDb,bands}` |
 | `set-window-spatialization` | `config: WindowSpatializationConfigV1` |
+
+`shutdown` releases the audio devices and ends the engine process. It exists
+because the engine can outlive the interface: it may have been started by the
+session or by an earlier run, so a host that is quitting cannot rely on
+terminating a child process it does not necessarily own. The engine
+acknowledges the command before tearing its IPC server down. A host that owns
+the process should still wait a bounded time for the exit and terminate it as a
+last resort.
 
 Every parsed command whose non-zero `commandId` can be recovered produces
 exactly one response on the duplex pipe:

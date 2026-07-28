@@ -455,13 +455,14 @@ void append_bands(std::ostringstream& output, const MaterialBands& value) {
     case EngineCommandType::set_headphone_eq: return "set-headphone-eq";
     case EngineCommandType::set_audio_route: return "set-audio-route";
     case EngineCommandType::set_window_spatialization: return "set-window-spatialization";
+    case EngineCommandType::shutdown: return "shutdown";
     }
     return "start";
 }
 
 [[nodiscard]] EngineCommandType parse_command_type(std::string_view value) {
     for (std::uint32_t raw = 0;
-         raw <= static_cast<std::uint32_t>(EngineCommandType::set_window_spatialization);
+         raw <= static_cast<std::uint32_t>(EngineCommandType::shutdown);
          ++raw) {
         const auto type = static_cast<EngineCommandType>(raw);
         if (command_type_name(type) == value) return type;
@@ -1165,6 +1166,7 @@ ParseResult<EngineCommandV1> engine_command_from_json(std::string_view json) noe
         switch (command.type) {
         case EngineCommandType::start:
         case EngineCommandType::stop:
+        case EngineCommandType::shutdown:
             reject_unknown_fields(root_object, {"schemaVersion", "commandId", "type"}, "command");
             break;
         case EngineCommandType::set_bypass:

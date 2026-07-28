@@ -205,6 +205,29 @@ void test_wasapi_period_and_capture_budget_policy() {
     CHECK(select_asrc_target_fill_frames(480, 48, 128) == 480);
     CHECK(select_asrc_target_fill_frames(3'840, 48, 128) == 3'840);
     CHECK(select_asrc_target_fill_frames(48, 128, 256) == 256);
+
+    // Regression: the FIFO target used to track the instantaneous packet size,
+    // so it moved on every capture wake and the drift controller chased a
+    // setpoint unrelated to clock drift. Exclusive mode, whose render period is
+    // short, could be pulled into an audible underrun by that. A varying packet
+    // sequence must now produce a target that never moves back down.
+    constexpr std::uint32_t exclusive_render_period = 144;
+    constexpr std::uint32_t requested_buffer = 128;
+    const std::uint32_t observed_sequence[]{144, 480, 144, 96, 960, 480, 144};
+    std::uint32_t high_water = 0;
+    std::uint32_t previous_target = 0;
+    for (const std::uint32_t frames : observed_sequence) {
+        high_water = capture_packet_high_water(high_water, frames);
+        const std::uint32_t target =
+            select_asrc_target_fill_frames(high_water, exclusive_render_period, requested_buffer);
+        CHECK(target >= previous_target);
+        CHECK(target >= frames);
+        previous_target = target;
+    }
+    CHECK(previous_target == 960);
+    // A packet never larger than the render guard leaves the guard in charge.
+    CHECK(select_asrc_target_fill_frames(capture_packet_high_water(0, 96), exclusive_render_period,
+                                         requested_buffer) == exclusive_render_period * 2);
 }
 
 void test_exclusive_render_format_policy_and_pcm_s32_conversion() {
@@ -2042,7 +2065,8 @@ void test_json_and_ui_commands() {
         CHECK(external_roundtrip.value->audio.output_device_id == std::optional<std::string>("usb-headphones"));
     }
 
-    const std::array<std::string, 7> commands{
+    const std::array<std::string, 8> commands{
+        R"({"schemaVersion":1,"type":"shutdown"})",
         R"({"schemaVersion":1,"type":"set-bypass","enabled":true})",
         R"({"schemaVersion":1,"type":"set-output-device","deviceId":"usb-headset"})",
         R"({"schemaVersion":1,"type":"set-audio-mode","mode":"exclusive-pro"})",
@@ -2067,6 +2091,17 @@ void test_json_and_ui_commands() {
     const auto invalid_external_route = engine_command_from_json(
         R"({"schemaVersion":1,"type":"set-audio-route","captureProvider":"external-render","captureEndpointId":null,"outputDeviceId":"usb-headphones"})");
     CHECK(invalid_external_route);
+
+    // A quitting UI must be able to release the audio devices even when the
+    // engine was started by the session rather than by that UI.
+    const auto shutdown_command = engine_command_from_json(R"({"schemaVersion":1,"type":"shutdown"})");
+    CHECK(shutdown_command);
+    if (shutdown_command) {
+        CHECK(shutdown_command.value->type == EngineCommandType::shutdown);
+        CHECK(engine_command_to_json(*shutdown_command.value).find("\"shutdown\"") != std::string::npos);
+    }
+    // Shutdown carries no payload; a stray field must still be refused.
+    CHECK(!engine_command_from_json(R"({"schemaVersion":1,"type":"shutdown","enabled":true})"));
     EngineStatusV1 status{};
     status.capture_state = StreamState::running;
     status.render_state = StreamState::running;

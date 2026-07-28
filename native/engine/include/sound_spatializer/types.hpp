@@ -231,6 +231,10 @@ enum class EngineCommandType : std::uint32_t {
     set_headphone_eq,
     set_audio_route,
     set_window_spatialization,
+    // Releases the audio devices and ends the host process. The engine can
+    // outlive the UI (session autostart, a previous run), so a UI that is
+    // quitting cannot rely on killing a child it may not own.
+    shutdown,
 };
 
 struct EngineCommandV1 {

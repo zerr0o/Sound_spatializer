@@ -21,7 +21,7 @@ use tauri::{
     ipc::{InvokeBody, Request},
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, State, WindowEvent,
+    AppHandle, Manager, RunEvent, State, WindowEvent,
 };
 
 const MAX_JSON_BYTES: usize = 1 << 20;
@@ -1065,6 +1065,56 @@ fn start_engine(app: AppHandle, state: State<'_, DesktopState>) -> Result<(), St
         thread::sleep(Duration::from_millis(25));
     }
     Ok(())
+}
+
+const ENGINE_SHUTDOWN_POLL: Duration = Duration::from_millis(25);
+const ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(2_500);
+
+/// Arrête le moteur audio quand l'interface se termine.
+///
+/// Le moteur est un processus distinct qui peut survivre à l'UI : il est parfois
+/// lancé à l'ouverture de session, et `ensure_engine_process` se raccroche
+/// volontairement à une instance déjà présente. Tuer un enfant que l'on ne
+/// possède pas toujours ne suffit donc pas ; la demande passe d'abord par le
+/// pipe, ce qui laisse le moteur libérer WASAPI et écrire sa configuration.
+/// La terminaison forcée ne sert que de garde-fou.
+fn shutdown_engine(state: &DesktopState) {
+    let payload = "{\"schemaVersion\":1,\"type\":\"shutdown\"}";
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(payload.as_bytes());
+    // Un moteur déjà absent fait échouer l'écriture : c'est le résultat voulu,
+    // il n'y a alors rien à arrêter.
+    let requested = write_pipe(&state.pipe, &frame).is_ok();
+
+    let Ok(mut process) = state.process.lock() else {
+        return;
+    };
+    let Some(child) = process.as_mut() else {
+        // Le moteur appartient à une autre instance ou à la session : la
+        // commande ci-dessus est le seul levier disponible, et elle suffit.
+        return;
+    };
+
+    if requested {
+        let deadline = std::time::Instant::now() + ENGINE_SHUTDOWN_TIMEOUT;
+        while std::time::Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    *process = None;
+                    return;
+                }
+                Ok(None) => thread::sleep(ENGINE_SHUTDOWN_POLL),
+                Err(_) => break,
+            }
+        }
+    }
+
+    // Sortie propre refusée ou impossible : ne pas laisser un moteur orphelin
+    // tenir le périphérique audio sans interface pour le piloter.
+    let _ = child.kill();
+    let _ = child.wait();
+    *process = None;
 }
 
 fn ensure_engine_process(app: &AppHandle, state: &DesktopState) -> Result<(), String> {
@@ -2336,8 +2386,16 @@ pub fn run() {
                 .build(app)?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("échec pendant l’exécution de Sound Spatializer");
+        .build(tauri::generate_context!())
+        .expect("échec pendant la construction de Sound Spatializer")
+        .run(|app, event| {
+            // Couvre le menu Quitter comme toute autre sortie de la boucle
+            // d'évènements : l'UI ne se ferme jamais en laissant le moteur
+            // tenir le périphérique audio.
+            if matches!(event, RunEvent::Exit) {
+                shutdown_engine(&app.state::<DesktopState>());
+            }
+        });
 }
 
 #[cfg(test)]

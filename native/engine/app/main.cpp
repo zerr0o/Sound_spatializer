@@ -39,6 +39,13 @@ public:
             std::cerr << "Engine command rejected: " << error << '\n';
             return {false, false, std::move(error)};
         }
+        if (command.type == sound_spatializer::EngineCommandType::shutdown) {
+            // Acknowledge before the loop tears the IPC server down, so the
+            // caller learns the request was accepted rather than seeing the
+            // pipe disappear under it.
+            keep_running.store(false, std::memory_order_release);
+            return {true, true, {}};
+        }
         bool persisted = true;
         // `start` can replace a requested exclusive mode with its effective
         // shared fallback, so it is scene-mutating for persistence purposes.
@@ -156,7 +163,11 @@ int run_engine(const std::vector<std::string>& arguments) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
     while (keep_running.load(std::memory_order_acquire)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        // Status keeps its 250 ms cadence, but a shutdown request must not wait
+        // a whole period: a UI that is quitting is holding its own exit open.
+        for (int slice = 0; slice < 10 && keep_running.load(std::memory_order_acquire); ++slice)
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        if (!keep_running.load(std::memory_order_acquire)) break;
         std::string publish_error;
         (void)ipc.publish_status(engine->status(), publish_error); // no connected UI is a normal state
     }

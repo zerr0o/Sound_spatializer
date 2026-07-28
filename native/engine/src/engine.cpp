@@ -478,6 +478,9 @@ bool SpatialAudioEngine::execute_command(const EngineCommandV1& command, std::st
     case EngineCommandType::start:
         return start_audio(error);
     case EngineCommandType::stop:
+    case EngineCommandType::shutdown:
+        // Both release the devices here. Ending the process is the host's job:
+        // the engine object does not own its own lifetime.
         stop_audio();
         error.clear();
         return true;

@@ -838,6 +838,10 @@ void WasapiAudioBackend::worker(std::stop_token stop_token) {
                 ? std::max<UINT32>(render_buffer_frames, 1)
                 : 0U);
         UINT32 minimum_observed_capture_packet = std::max<UINT32>(1U, current_capture_period);
+        // Bounded by construction: a packet larger than the capture buffer is
+        // rejected as an error before it can reach this high-water mark, so the
+        // FIFO target can never exceed the endpoint's own buffer.
+        UINT32 maximum_observed_capture_packet = 0U;
 
         if (config_.mode == AudioMode::exclusive_pro) {
             // An event-driven exclusive stream owns the complete endpoint
@@ -921,8 +925,19 @@ void WasapiAudioBackend::worker(std::stop_token stop_token) {
                     minimum_observed_capture_packet =
                         std::min(minimum_observed_capture_packet, frames);
                     capture_period_.store(minimum_observed_capture_packet, std::memory_order_relaxed);
+                    // The FIFO has to absorb the largest packet the capture side
+                    // ever delivers, so the target follows a high-water mark.
+                    // Tracking the instantaneous packet instead made the target
+                    // move on every wake; the drift controller then chased a
+                    // moving setpoint and its ratio corrections had nothing to
+                    // do with real clock drift. Exclusive mode felt it most:
+                    // its render period is short, so the constant retargeting
+                    // could drain the FIFO into an audible underrun.
+                    maximum_observed_capture_packet =
+                        capture_packet_high_water(maximum_observed_capture_packet, frames);
                     resampler.set_target_fill(select_asrc_target_fill_frames(
-                        frames, selected_period, config_.requested_buffer_frames));
+                        maximum_observed_capture_packet, selected_period,
+                        config_.requested_buffer_frames));
                 }
                 if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || data == nullptr)
                     std::fill_n(capture_work.data(), frames, ProgrammeFrame{});

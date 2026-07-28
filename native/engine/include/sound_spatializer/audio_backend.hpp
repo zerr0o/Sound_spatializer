@@ -202,6 +202,15 @@ struct CaptureDrainBudget {
     return static_cast<std::uint32_t>(target > maximum_uint32 ? maximum_uint32 : target);
 }
 
+// WASAPI packet sizes vary from wake to wake. The ASRC target must follow the
+// largest packet observed so far rather than the latest one: a target that
+// moves on every packet turns the drift controller into a follower of its own
+// setpoint, and its ratio corrections stop reflecting real clock drift.
+[[nodiscard]] constexpr std::uint32_t capture_packet_high_water(std::uint32_t previous_high_water,
+                                                                std::uint32_t observed_frames) noexcept {
+    return observed_frames > previous_high_water ? observed_frames : previous_high_water;
+}
+
 [[nodiscard]] constexpr std::uint32_t audio_reconnect_backoff_ms(std::uint32_t attempt) noexcept {
     return 250U << (attempt < 3U ? attempt : 3U);
 }
